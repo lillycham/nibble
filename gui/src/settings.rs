@@ -29,13 +29,19 @@ pub struct Field {
 
 /// The settings worth a place on the page, in order. Anything else is still
 /// honoured from the file; it just has no field here.
-pub const FIELDS: [Field; 10] = [
+pub const FIELDS: [Field; 11] = [
     Field { key: "url", label: "Server address", hint: "default: http://127.0.0.1:8765", kind: Kind::Text },
     Field { key: "token", label: "Access token", hint: "not set, which is fine on this machine alone", kind: Kind::Secret },
     Field {
         key: "model",
         label: "Model folder",
         hint: "not set here: the server was given its model when it was started",
+        kind: Kind::Text,
+    },
+    Field {
+        key: "model_dir",
+        label: "Models to choose from",
+        hint: "default: the folder that holds the model folder",
         kind: Kind::Text,
     },
     Field {

@@ -27,6 +27,11 @@
   header { display: flex; align-items: baseline; gap: 12px; padding-top: 14px; padding-bottom: 10px; }
   header h1 { font-size: 1.05rem; margin: 0; letter-spacing: 0.02em; }
   header span { color: var(--dim); font-size: 0.85rem; flex: 1; }
+  header select {
+    font: inherit; font-size: 0.85rem; color: var(--dim); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px; max-width: 60%;
+  }
+  header select[hidden] { display: none; }
   button {
     font: inherit; color: var(--fg); background: none;
     border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer;
@@ -56,7 +61,7 @@
 <body>
 <header>
   <h1>nibble</h1>
-  <span>a small local model</span>
+  <span><span id="model">a small local model</span><select id="models" hidden aria-label="Model"></select></span>
   <button id="new" type="button">New chat</button>
 </header>
 <form id="auth" hidden>
@@ -92,6 +97,43 @@ auth.addEventListener('submit', e => {
 
 let messages = [];
 let running = null;
+
+// The model in use, and a list to switch to another when there is a choice.
+const modelName = document.getElementById('model');
+const modelList = document.getElementById('models');
+
+function showModels(info) {
+  if (!info.model) return;
+  modelName.textContent = info.model;
+  const models = info.models || [];
+  modelList.hidden = models.length < 2;
+  modelName.hidden = !modelList.hidden;
+  modelList.replaceChildren(...models.map(name => new Option(name, name, false, name === info.model)));
+}
+
+fetch('info').then(r => r.json()).then(showModels).catch(() => {});
+
+modelList.addEventListener('change', async () => {
+  const wanted = modelList.value;
+  try {
+    const response = await fetch('model', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token && { Authorization: 'Bearer ' + token }) },
+      body: JSON.stringify({ model: wanted }),
+    });
+    if (response.status === 401) {
+      auth.hidden = false;
+      tokenInput.focus();
+      throw new Error('This server needs its access token. Enter it above, then pick the model again.');
+    }
+    if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
+    showModels(await response.json());
+  } catch (e) {
+    add('note error', e.message);
+    // Show the model that is really in use.
+    fetch('info').then(r => r.json()).then(showModels).catch(() => {});
+  }
+});
 
 function add(kind, text) {
   const el = document.createElement('div');

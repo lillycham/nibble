@@ -5,12 +5,14 @@
 use std::error::Error;
 use std::io::{self, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
 
 use crate::{chat, tools, web};
 
@@ -67,6 +69,8 @@ struct Config {
 }
 
 struct Backend {
+    /// The model the server runs, or will run when it next starts.
+    model: String,
     child: Option<Child>,
     active: usize,
     last_used: Instant,
@@ -132,13 +136,14 @@ fn acquire(config: &Config, state: &Arc<Mutex<Backend>>) -> io::Result<InUse> {
         eprintln!("nibble serve: starting model server");
         let started = Instant::now();
         let port = config.backend_port.to_string();
-        let fill = |arg: &String| arg.replace("{model}", &config.model).replace("{port}", &port);
+        let model = backend.model.clone();
+        let fill = |arg: &String| arg.replace("{model}", &model).replace("{port}", &port);
         // The default command line is mlx_lm.server's. Arguments that name
         // {model} or {port} replace it, for a server with other flags.
         let args: Vec<String> = if config.server_args.iter().any(|arg| *arg != fill(arg)) {
             config.server_args.iter().map(fill).collect()
         } else {
-            let fixed = ["--model", &config.model, "--host", "127.0.0.1", "--port", &port];
+            let fixed = ["--model", &model, "--host", "127.0.0.1", "--port", &port];
             fixed.iter().map(|arg| arg.to_string()).chain(config.server_args.iter().cloned()).collect()
         };
         let mut child = Command::new(&config.server)
@@ -167,6 +172,79 @@ fn acquire(config: &Config, state: &Arc<Mutex<Backend>>) -> io::Result<InUse> {
     Ok(InUse(state.clone()))
 }
 
+/// The model given at the start, which stays a choice even when it is
+/// outside the model directory.
+static FIRST_MODEL: OnceLock<String> = OnceLock::new();
+
+/// The models to choose from, by name: each entry in the model directory, and
+/// the model given at the start. Read afresh each time, so a model that was
+/// just downloaded shows up.
+pub fn models() -> Vec<(String, PathBuf)> {
+    let first = FIRST_MODEL.get().map(PathBuf::from);
+    let settings = crate::config::get();
+    let dir = match settings.model_dir.as_str() {
+        "" => first.as_deref().and_then(Path::parent).map(Path::to_path_buf),
+        dir => Some(tools::expand(dir)),
+    };
+    let mut found: Vec<PathBuf> = dir
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .collect();
+    // A model named by Hugging Face id is no path, but still a choice.
+    found.extend(first.filter(|first| !found.contains(first)));
+    let mut models: Vec<(String, PathBuf)> = found.into_iter().map(|path| (name(&path), path)).collect();
+    models.sort();
+    models.dedup_by(|a, b| a.0 == b.0);
+    models
+}
+
+fn name(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    path.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string()
+}
+
+/// `POST /model` with {"model": NAME}: run another model from the next
+/// request on. Only a model from the list, so a client can't make the server
+/// load whatever it names.
+fn switch(client: &mut TcpStream, request: &web::Request, state: &Mutex<Backend>) -> io::Result<()> {
+    let body: Value = serde_json::from_slice(&request.body(client)?).unwrap_or_default();
+    let wanted = body["model"].as_str().unwrap_or_default();
+    let Some((_, path)) = models().into_iter().find(|(name, _)| name == wanted) else {
+        let body = format!("no model called \"{wanted}\"\n");
+        return web::respond(client, "404 Not Found", "text/plain", body.as_bytes());
+    };
+    let path = path.to_string_lossy().into_owned();
+    let mut backend = state.lock().unwrap();
+    if backend.model != path {
+        if backend.active > 0 {
+            return web::respond(client, "409 Conflict", "text/plain", b"the model is busy; try again when it finishes\n");
+        }
+        // Load the settings first: if the file has gone bad, keep the old model.
+        if let Err(e) = crate::config::switch(&path) {
+            return web::respond(client, "500 Internal Server Error", "text/plain", format!("{e}\n").as_bytes());
+        }
+        if let Some(mut child) = backend.child.take() {
+            CHILD_PID.store(0, Ordering::SeqCst);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        eprintln!("nibble serve: switched to {wanted}");
+        backend.model = path;
+    }
+    web::respond(client, "200 OK", "application/json", info().to_string().as_bytes())
+}
+
+/// What `GET /info` says: the model, the others to choose from, and more.
+pub fn info() -> Value {
+    let config = crate::config::get();
+    let models: Vec<String> = models().into_iter().map(|(name, _)| name).collect();
+    json!({ "model": config.model_name, "models": models, "tools": web::tools_allowed(), "version": env!("CARGO_PKG_VERSION") })
+}
+
 fn pipe(mut from: TcpStream, mut to: TcpStream) {
     let _ = io::copy(&mut from, &mut to);
     let _ = to.shutdown(Shutdown::Write);
@@ -181,6 +259,9 @@ fn handle(mut client: TcpStream, config: &Config, state: &Arc<Mutex<Backend>>) -
         return web::respond(&mut client, "401 Unauthorized", "text/plain", b"nibble serve: a token is needed\n");
     }
     // Only the model API goes to the model server. The rest is ours.
+    if (request.method.as_str(), request.path.as_str()) == ("POST", "/model") {
+        return switch(&mut client, &request, state);
+    }
     if !request.path.starts_with("/v1/") {
         return web::route(&mut client, &request);
     }
@@ -224,8 +305,10 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
         println!("{USAGE}");
         return Ok(());
     };
+    let _ = FIRST_MODEL.set(config.model.clone());
     let config = Arc::new(config);
-    let state = Arc::new(Mutex::new(Backend { child: None, active: 0, last_used: Instant::now() }));
+    let backend = Backend { model: config.model.clone(), child: None, active: 0, last_used: Instant::now() };
+    let state = Arc::new(Mutex::new(backend));
 
     let listener = TcpListener::bind(&config.listen)
         .map_err(|e| format!("can't listen on {}: {e}", config.listen))?;

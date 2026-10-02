@@ -16,7 +16,8 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
     App, Application, Bounds, Context, Div, Entity, Focusable, Hsla, KeyBinding, ScrollHandle, SharedString, Stateful,
-    TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
+    TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div,
+    prelude::*, px, rgb, size,
 };
 use serde_json::{Value, json};
 
@@ -86,11 +87,40 @@ impl Server {
             .into()
     }
 
-    /// The name of the model the server runs, if it will say.
-    fn model(&self) -> Option<String> {
+    /// The model the server runs and the others it offers, if it will say.
+    fn models(&self) -> Option<Models> {
         let mut response = self.agent(3).get(format!("{}/info", self.url)).call().ok()?;
-        let info: Value = serde_json::from_str(&response.body_mut().read_to_string().ok()?).ok()?;
-        info["model"].as_str().filter(|name| !name.is_empty()).map(str::to_string)
+        Models::from(&serde_json::from_str(&response.body_mut().read_to_string().ok()?).ok()?)
+    }
+
+    /// Ask the server to run another model from the next message on.
+    fn switch(&self, model: &str) -> Result<Models, String> {
+        let mut post = self.agent(10).post(format!("{}/model", self.url));
+        if !self.token.is_empty() {
+            post = post.header("Authorization", format!("Bearer {}", self.token));
+        }
+        let mut response = post.send_json(json!({ "model": model })).map_err(|e| e.to_string())?;
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        match response.status().as_u16() {
+            200 => serde_json::from_str(&body).ok().as_ref().and_then(Models::from).ok_or("a bad answer".into()),
+            401 => Err("the server needs a token; set it in Settings".into()),
+            _ => Err(body.trim().to_string()),
+        }
+    }
+}
+
+/// From the server's /info.
+#[derive(Default)]
+struct Models {
+    current: String,
+    all: Vec<String>,
+}
+
+impl Models {
+    fn from(info: &Value) -> Option<Self> {
+        let current = info["model"].as_str().filter(|name| !name.is_empty())?.to_string();
+        let all = info["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        Some(Models { current, all })
     }
 }
 
@@ -147,7 +177,13 @@ enum View {
 
 struct Nibble {
     server: Server,
-    model: String,
+    models: Models,
+    /// Whether the model list is open, and what went wrong with the last switch.
+    picking: bool,
+    model_error: Option<String>,
+    /// Whether the pointer is on the model button, whose own click opens and
+    /// closes the list, so that a click there doesn't also count as outside.
+    on_picker: bool,
     view: View,
     input: Entity<TextInput>,
     chat: Chat,
@@ -175,7 +211,10 @@ impl Nibble {
         let fields = FIELDS.iter().map(|field| cx.new(|cx| TextInput::new(field.hint, cx))).collect();
         let mut nibble = Nibble {
             server: Server::load(),
-            model: String::new(),
+            models: Models::default(),
+            picking: false,
+            model_error: None,
+            on_picker: false,
             view: View::Chat,
             input,
             chat: Chat::new(),
@@ -191,22 +230,51 @@ impl Nibble {
         nibble
     }
 
-    /// Ask the server which model it runs, off the main thread, for the header.
+    /// Ask the server which models it has, off the main thread, for the header.
     fn find_model(&mut self, cx: &mut Context<Self>) {
         let server = self.server.clone();
+        self.update_models(cx, move || Ok(server.models().unwrap_or_default()));
+    }
+
+    /// Run `get` on a plain thread, and show the models it returns.
+    fn update_models(&mut self, cx: &mut Context<Self>, get: impl FnOnce() -> Result<Models, String> + Send + 'static) {
         let (send, mut receive) = mpsc::unbounded();
         std::thread::spawn(move || {
-            let _ = send.unbounded_send(server.model().unwrap_or_default());
+            let _ = send.unbounded_send(get());
         });
         cx.spawn(async move |this, cx| {
-            if let Some(model) = receive.next().await {
+            if let Some(outcome) = receive.next().await {
                 let _ = this.update(cx, |nibble, cx| {
-                    nibble.model = model;
+                    match outcome {
+                        Ok(models) => nibble.models = models,
+                        Err(error) => nibble.model_error = Some(error),
+                    }
+                    nibble.trace();
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
+
+    fn toggle_models(&mut self, cx: &mut Context<Self>) {
+        self.picking = !self.picking;
+        if self.picking {
+            // Look again, for a model downloaded since the window opened.
+            self.find_model(cx);
+        }
+        cx.notify();
+    }
+
+    fn pick_model(&mut self, model: String, cx: &mut Context<Self>) {
+        self.picking = false;
+        self.model_error = None;
+        if model == self.models.current {
+            return cx.notify();
+        }
+        let server = self.server.clone();
+        self.update_models(cx, move || server.switch(&model));
+        cx.notify();
     }
 
     fn stop(&mut self) {
@@ -303,7 +371,10 @@ impl Nibble {
         if std::env::var_os("NIBBLE_GUI_TRACE").is_none() {
             return;
         }
-        eprintln!("chats saved: {}, model: {}", self.chats.len(), self.model);
+        eprintln!("chats saved: {}, model: {} of {:?}", self.chats.len(), self.models.current, self.models.all);
+        if let Some(error) = &self.model_error {
+            eprintln!("model error: {error}");
+        }
         for part in self.chat.turns.last().map(|turn| turn.parts.as_slice()).unwrap_or_default() {
             match part {
                 Part::Text(text) => eprintln!("reply: {text}"),
@@ -437,6 +508,16 @@ impl Nibble {
                 eprintln!("selftest delete: {before} -> {} chats, open chat is empty: {}", nibble.chats.len(), nibble.chat.turns.is_empty());
             })?;
             cx.background_executor().timer(pause).await;
+            this.update_in(cx, |nibble, _, cx| {
+                nibble.toggle_models(cx);
+                eprintln!("selftest models open: {}", nibble.picking);
+                let other = nibble.models.all.iter().find(|model| **model != nibble.models.current).cloned();
+                match other {
+                    Some(other) => nibble.pick_model(other, cx),
+                    None => eprintln!("selftest: the server offers no other model"),
+                }
+            })?;
+            cx.background_executor().timer(Duration::from_secs(2)).await;
             this.update_in(cx, |_, _, cx| {
                 eprintln!("selftest done");
                 cx.quit();
@@ -575,7 +656,6 @@ impl Nibble {
                     .children(copy.map(|copy| div().flex().child(copy)))
             }),
         );
-        let model = if self.model.is_empty() { "a small local model".to_string() } else { self.model.clone() };
 
         div()
             .flex_1()
@@ -591,7 +671,11 @@ impl Nibble {
                     .px_4()
                     .py_2()
                     .child(div().font_weight(gpui::FontWeight::BOLD).child("nibble"))
-                    .child(div().flex_1().text_color(theme.dim).text_size(px(12.)).child(model)),
+                    .child(self.model_picker(theme, cx))
+                    .when_some(self.model_error.clone(), |row, error| {
+                        row.child(div().text_color(theme.accent).text_size(px(12.)).child(error))
+                    })
+                    .child(div().flex_1()),
             )
             .child(log)
             .child(
@@ -618,6 +702,73 @@ impl Nibble {
                             .on_click(cx.listener(|nibble, _, window, cx| nibble.submit(&Submit, window, cx))),
                     ),
             )
+    }
+
+    /// The model in use, and a list of the others to switch to when the
+    /// server offers more than one.
+    fn model_picker(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = &self.models.current;
+        let label = if current.is_empty() { "a small local model".to_string() } else { current.clone() };
+        if self.models.all.len() < 2 {
+            return div().text_color(theme.dim).text_size(px(12.)).child(label).into_any_element();
+        }
+        let hover = theme.user;
+        let rows = self.models.all.iter().enumerate().map(|(n, model)| {
+            let picked = model.clone();
+            div()
+                .id(("model", n))
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .when(model == current, |row| row.font_weight(gpui::FontWeight::BOLD))
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |nibble, _, _, cx| nibble.pick_model(picked.clone(), cx)))
+                .child(SharedString::from(model.clone()))
+        });
+        let menu = div()
+            .id("models")
+            .occlude()
+            .mt_1()
+            .p_1()
+            .min_w(px(220.))
+            .flex()
+            .flex_col()
+            .bg(theme.bg)
+            .border_1()
+            .border_color(theme.line)
+            .rounded_lg()
+            .shadow_md()
+            .text_size(px(13.))
+            .on_mouse_down_out(cx.listener(|nibble, _, _, cx| {
+                if !nibble.on_picker {
+                    nibble.picking = false;
+                    cx.notify();
+                }
+            }))
+            .children(rows);
+
+        div()
+            .child(
+                div()
+                    .id("model")
+                    .flex()
+                    .gap_1()
+                    .px_2()
+                    .rounded_md()
+                    .text_color(theme.dim)
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .on_hover(cx.listener(|nibble, hovered: &bool, _, _| nibble.on_picker = *hovered))
+                    .on_click(cx.listener(|nibble, _, _, cx| nibble.toggle_models(cx)))
+                    .child(label)
+                    .child("▾"),
+            )
+            .when(self.picking, |picker| {
+                picker.child(deferred(anchored().child(menu)))
+            })
+            .into_any_element()
     }
 
     fn settings_view(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {

@@ -76,6 +76,13 @@ adds your own:
 
 The key is looked for in the model's name.
 
+## More than one model
+
+The chat page and the window have a list to switch models. It holds every
+entry in `model_dir`, which defaults to the directory that holds `model`. The
+switch applies from the next message, and each model's presets come with it.
+A restart of `nibble serve` goes back to `model`.
+
 ## Reach
 
 `nibble serve` listens on this machine only. To listen on another address, set

@@ -5,7 +5,7 @@
 //! Four characters is roughly one token of English, three of code.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use serde_json::{json, Value};
 
@@ -45,6 +45,9 @@ pub struct Config {
     pub roots: Vec<String>,
     // `nibble serve`
     pub model: String,
+    /// Where the models to choose from are: each entry in it is one. Empty
+    /// means the directory that holds `model`.
+    pub model_dir: String,
     pub listen: String,
     pub backend_port: u16,
     pub idle_seconds: u64,
@@ -80,6 +83,7 @@ impl Default for Config {
             system_tools: String::new(),
             roots: Vec::new(),
             model: String::new(),
+            model_dir: String::new(),
             listen: "127.0.0.1:8765".into(),
             backend_port: 8766,
             idle_seconds: 600,
@@ -126,6 +130,7 @@ impl Config {
             "system_tools" => text(value).map(|v| self.system_tools = v),
             "roots" => list(value).map(|v| self.roots = v),
             "model" => text(value).map(|v| self.model = v),
+            "model_dir" => text(value).map(|v| self.model_dir = v),
             "listen" => text(value).map(|v| self.listen = v),
             "backend_port" => number(value).map(|v| self.backend_port = v),
             "idle_seconds" => number(value).map(|v| self.idle_seconds = v),
@@ -157,6 +162,7 @@ impl Config {
             "system_tools": self.system_tools,
             "roots": self.roots,
             "model": self.model,
+            "model_dir": self.model_dir,
             "listen": self.listen,
             "backend_port": self.backend_port,
             "idle_seconds": self.idle_seconds,
@@ -222,10 +228,15 @@ fn load(flag_model: Option<String>, ask_server: bool) -> Result<Config, String> 
     let setting = |key: &str| file.get(key).and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_string);
 
     // The model has to be known first, because it decides which presets apply.
-    let mut model = flag_model.clone().or_else(|| var("NIBBLE_MODEL")).or_else(|| setting("model")).unwrap_or_default();
+    // A running server knows better than the "model" setting, which only says
+    // what it starts with: it may have switched since.
+    let mut model = flag_model.clone().or_else(|| var("NIBBLE_MODEL")).unwrap_or_default();
     if model.is_empty() && ask_server {
         let url = var("NIBBLE_URL").or_else(|| setting("url")).unwrap_or_else(|| Config::default().url);
         model = served_model(&url).unwrap_or_default();
+    }
+    if model.is_empty() {
+        model = setting("model").unwrap_or_default();
     }
     let name = model.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string();
     let matches = |pattern: &str| !name.is_empty() && name.to_lowercase().contains(&pattern.to_lowercase());
@@ -269,17 +280,36 @@ fn load(flag_model: Option<String>, ask_server: bool) -> Result<Config, String> 
     Ok(config)
 }
 
-static CONFIG: OnceLock<Config> = OnceLock::new();
+// Each config is leaked, so `get` can hand out plain references. Only a model
+// switch makes a new one, and that leaks a few hundred bytes.
+static CONFIG: RwLock<Option<&'static Config>> = RwLock::new(None);
+
+fn set(config: Config) {
+    *CONFIG.write().unwrap() = Some(Box::leak(Box::new(config)));
+}
 
 /// Read the config file. Call once, before anything uses `get`.
 pub fn init(flag_model: Option<String>, ask_server: bool) -> Result<(), String> {
-    let config = load(flag_model, ask_server)?;
-    CONFIG.set(config).map_err(|_| "config loaded twice".to_string())
+    if CONFIG.read().unwrap().is_some() {
+        return Err("config loaded twice".into());
+    }
+    set(load(flag_model, ask_server)?);
+    Ok(())
+}
+
+/// Load the settings again for another model, so its presets apply.
+pub fn switch(model: &str) -> Result<(), String> {
+    set(load(Some(model.to_string()), false)?);
+    Ok(())
 }
 
 /// The settings. Tests never call `init`, so they get the defaults.
 pub fn get() -> &'static Config {
-    CONFIG.get_or_init(Config::default)
+    if let Some(config) = *CONFIG.read().unwrap() {
+        return config;
+    }
+    let mut config = CONFIG.write().unwrap();
+    *config.get_or_insert_with(|| Box::leak(Box::new(Config::default())))
 }
 
 #[cfg(test)]
