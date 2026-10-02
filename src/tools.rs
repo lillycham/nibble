@@ -45,7 +45,7 @@ pub fn schemas(claude: bool) -> Vec<Value> {
         ),
         schema(
             "search",
-            "Find lines that contain a piece of text, in one file or in every file under a directory. Not a regex. Ignores case.",
+            "Find lines that contain the words you give, in any order, in one file or in every file under a directory. Ignores case. One or two distinctive words work best.",
             json!({
                 "text": { "type": "string" },
                 "path": { "type": "string", "description": "Defaults to the current directory" },
@@ -107,7 +107,16 @@ pub fn expand(path: &str) -> PathBuf {
 
 /// Turn a path from the model or from Claude into one we may read.
 pub fn resolve(path: &str) -> Result<PathBuf, String> {
-    let path = expand(path);
+    let mut path = expand(path);
+    // The model is told the name of the directory it is in, and sometimes
+    // starts its paths with that name. Take it as meant.
+    if !path.exists() {
+        if let (Ok(here), Some(first)) = (std::env::current_dir(), path.components().next()) {
+            if here.file_name() == Some(first.as_os_str()) {
+                path = Path::new(".").join(path.components().skip(1).collect::<PathBuf>());
+            }
+        }
+    }
     if !roots().is_empty() {
         // Canonical form, so neither .. nor a symlink can lead outside.
         let real = fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -231,24 +240,42 @@ fn list_dir(args: &Value) -> Result<String, String> {
     Ok(out)
 }
 
-fn search_file(path: &Path, needle: &str, matches: &mut Vec<String>) {
+/// Lines found so far: those with every word, and the nearest misses.
+#[derive(Default)]
+struct Found {
+    full: Vec<String>,
+    partial: Vec<(usize, String)>,
+}
+
+impl Found {
+    fn is_full(&self) -> bool {
+        self.full.len() > MAX_MATCHES
+    }
+}
+
+fn search_file(path: &Path, words: &[String], found: &mut Found) {
     let Ok(text) = read_text(path) else { return };
     for (number, line) in text.lines().enumerate() {
-        if matches.len() > MAX_MATCHES {
+        if found.is_full() {
             return;
         }
-        if line.to_lowercase().contains(needle) {
-            matches.push(format!("{}:{}: {}", path.display(), number + 1, clip(line.trim(), 200)));
+        let lower = line.to_lowercase();
+        let score = words.iter().filter(|word| lower.contains(word.as_str())).count();
+        let hit = || format!("{}:{}: {}", path.display(), number + 1, clip(line.trim(), 200));
+        if score == words.len() {
+            found.full.push(hit());
+        } else if score >= 2 && found.partial.len() < 500 {
+            found.partial.push((score, hit()));
         }
     }
 }
 
-fn search_dir(dir: &Path, needle: &str, matches: &mut Vec<String>) {
+fn search_dir(dir: &Path, words: &[String], found: &mut Found) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        if matches.len() > MAX_MATCHES {
+        if found.is_full() {
             return;
         }
         let name = entry.file_name();
@@ -257,35 +284,53 @@ fn search_dir(dir: &Path, needle: &str, matches: &mut Vec<String>) {
         let Ok(kind) = entry.file_type() else { continue };
         if kind.is_dir() {
             if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_ref()) {
-                search_dir(&entry.path(), needle, matches);
+                search_dir(&entry.path(), words, found);
             }
         } else if kind.is_file() && entry.metadata().is_ok_and(|m| m.len() <= MAX_SEARCH_FILE) {
-            search_file(&entry.path(), needle, matches);
+            search_file(&entry.path(), words, found);
         }
     }
 }
 
+/// A small model searches the way people type into a search box: a few words
+/// from the question, rarely an exact phrase from the file. So match the
+/// words in any order, and when no line has them all, show the nearest lines.
 fn search(args: &Value) -> Result<String, String> {
-    let needle = text_arg(args, "text")?.to_lowercase();
+    let text = text_arg(args, "text")?.to_lowercase();
+    let mut words: Vec<String> =
+        text.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| w.len() >= 2).map(str::to_string).collect();
+    words.sort();
+    words.dedup();
+    if words.is_empty() {
+        words.push(text);
+    }
     let path = path_arg(args)?;
-    let mut matches = Vec::new();
+    let mut found = Found::default();
     if path.is_dir() {
-        search_dir(&path, &needle, &mut matches);
+        search_dir(&path, &words, &mut found);
     } else {
         // Report a missing file, which the directory walk would skip in silence.
         read_text(&path)?;
-        search_file(&path, &needle, &mut matches);
+        search_file(&path, &words, &mut found);
     }
-    if matches.is_empty() {
-        return Ok("no matches\n".to_string());
+
+    if !found.full.is_empty() {
+        let more = found.is_full();
+        found.full.truncate(MAX_MATCHES);
+        let mut out = found.full.join("\n") + "\n";
+        if more {
+            out.push_str("... more matches not shown. Search a smaller path or add a word.\n");
+        }
+        return Ok(out);
     }
-    let more = matches.len() > MAX_MATCHES;
-    matches.truncate(MAX_MATCHES);
-    let mut out = matches.join("\n") + "\n";
-    if more {
-        out.push_str("... more matches not shown. Search a smaller path or a longer text.\n");
+    if !found.partial.is_empty() {
+        // Best first; the sort is stable, so ties stay in file order.
+        found.partial.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        let lines: Vec<_> = found.partial.into_iter().take(15).map(|(_, line)| line).collect();
+        return Ok(format!("No line has all of those words. The closest lines:\n{}\n", lines.join("\n")));
     }
-    Ok(out)
+    // Say what to do next, or a small model takes "no matches" as the answer.
+    Ok("no matches. Try one distinctive word, or list_dir to see which files there are.\n".to_string())
 }
 
 /// Whether `ask_claude` may be offered. When Claude is the one that called us,
@@ -339,7 +384,12 @@ mod tests {
         assert!(call("list_dir", &json!({ "path": ".." })).starts_with("error:"));
         assert!(call("search", &json!({ "text": "hidden", "path": "../out" })).starts_with("error:"));
         // The walk must not follow the symlink out either.
-        assert_eq!(call("search", &json!({ "text": "hidden" })), "no matches\n");
+        assert!(call("search", &json!({ "text": "hidden" })).starts_with("no matches"));
+        // Words match in any order, and the directory's own name is forgiven.
+        fs::write(inside.join("notes.txt"), "the server stops when idle\nstops for lunch\n").unwrap();
+        let hits = call("search", &json!({ "text": "idle server", "path": "in" }));
+        assert!(hits.contains("notes.txt:1:") && !hits.contains("lunch"), "{hits}");
+        assert!(call("search", &json!({ "text": "idle server banana" })).starts_with("No line has all"));
 
         fs::remove_dir_all(&base).unwrap();
     }

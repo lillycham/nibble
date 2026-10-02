@@ -236,12 +236,21 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
     let host = if address.ip().is_unspecified() { "127.0.0.1".to_string() } else { address.ip().to_string() };
     chat::set_url(format!("http://{host}:{}", address.port()));
 
-    // Chats get the file tools only inside configured roots. A server's own
-    // working directory means nothing: under launchd it is /.
-    let roots: Vec<PathBuf> = settings.roots.iter().map(|root| tools::expand(root)).collect();
+    // Chats get the file tools inside the configured roots, or failing that
+    // inside the directory we were started in, as `nibble mcp` does. Under
+    // launchd that directory is /, which is no root at all: then chats get no
+    // tools, and we say so, because a model without tools just looks unwilling.
+    let mut roots: Vec<PathBuf> = settings.roots.iter().map(|root| tools::expand(root)).collect();
+    if roots.is_empty() {
+        roots.extend(std::env::current_dir().ok().filter(|dir| dir.parent().is_some()));
+    }
     if let Some(first) = roots.first() {
         std::env::set_current_dir(first).map_err(|e| format!("{}: {e}", first.display()))?;
         tools::confine(&roots)?;
+        let shown: Vec<_> = roots.iter().map(|root| root.display().to_string()).collect();
+        eprintln!("nibble serve: chats may read files inside {}", shown.join(", "));
+    } else {
+        eprintln!("nibble serve: chats have no file tools; set \"roots\" in the config file to give them some");
     }
     web::allow_tools(!roots.is_empty());
 
