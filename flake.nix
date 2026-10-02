@@ -52,6 +52,14 @@
               mlx-lm = prev.mlx-lm.overridePythonAttrs (old: {
                 doCheck = false;
                 dependencies = old.dependencies ++ [ final.sentencepiece ];
+                # A small model sometimes ends its turn without the closing
+                # </tool_call> tag. The server then sees a stop with no state,
+                # and throws the whole call away. Keep any call text that is
+                # left when generation ends.
+                postPatch = (old.postPatch or "") + ''
+                  substituteInPlace mlx_lm/server.py \
+                    --replace-fail 'if prev_state == "tool" and tool_text:' 'if tool_text:'
+                '';
               });
             };
           };
