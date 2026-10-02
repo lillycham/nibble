@@ -14,7 +14,7 @@ use crate::{config, tools};
 const PAGE: &str = include_str!("chat.html");
 
 const MAX_HEAD: usize = 64 << 10;
-const MAX_BODY: usize = 1 << 20;
+const MAX_BODY: usize = 16 << 20;
 
 /// Whether chats may use the file tools. Only when roots are configured,
 /// because a server has no working directory worth trusting.
@@ -33,6 +33,7 @@ pub struct Request {
     pub path: String,
     authorization: String,
     content_length: usize,
+    chunked: bool,
     /// Everything read from the client so far: the head, and perhaps some body.
     pub raw: Vec<u8>,
     head_len: usize,
@@ -61,16 +62,17 @@ pub fn read_request(client: &mut TcpStream) -> io::Result<Option<Request>> {
     let target = first.next().unwrap_or_default();
     let path = target.split('?').next().unwrap_or_default().to_string();
 
-    let (mut authorization, mut content_length) = (String::new(), 0);
+    let (mut authorization, mut content_length, mut chunked) = (String::new(), 0, false);
     for line in lines {
         let Some((name, value)) = line.split_once(':') else { continue };
         match name.to_ascii_lowercase().as_str() {
             "authorization" => authorization = value.trim().to_string(),
             "content-length" => content_length = value.trim().parse().unwrap_or(0),
+            "transfer-encoding" => chunked = value.to_ascii_lowercase().contains("chunked"),
             _ => {}
         }
     }
-    Ok(Some(Request { method, path, authorization, content_length, raw, head_len }))
+    Ok(Some(Request { method, path, authorization, content_length, chunked, raw, head_len }))
 }
 
 impl Request {
@@ -91,6 +93,34 @@ impl Request {
         let Some(given) = self.authorization.strip_prefix("Bearer ") else { return false };
         // Compare every byte, so the time taken says nothing about where they differ.
         given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
+    }
+
+    /// The request as it should reach the model server, with the "model" of a
+    /// JSON body set to `model`. Otherwise a client with the token could make
+    /// the server load any model it names, even one from Hugging Face.
+    /// A body that is no JSON object goes on as it is: the server rejects it.
+    pub fn pinned(&self, client: &mut TcpStream, model: &str) -> io::Result<Vec<u8>> {
+        if self.method != "POST" {
+            return Ok(self.raw.clone());
+        }
+        if self.chunked {
+            return Err(io::Error::other("a chunked request body is not supported"));
+        }
+        let raw_body = self.body(client)?;
+        let Ok(Value::Object(mut body)) = serde_json::from_slice(&raw_body) else {
+            return Ok([&self.raw[..self.head_len], &raw_body[..]].concat());
+        };
+        body.insert("model".into(), model.into());
+        let body = Value::Object(body).to_string();
+        let head = String::from_utf8_lossy(&self.raw[..self.head_len]);
+        let mut out = String::new();
+        for line in head.split("\r\n").filter(|line| !line.is_empty()) {
+            if !line.to_ascii_lowercase().starts_with("content-length:") {
+                out += &format!("{line}\r\n");
+            }
+        }
+        out += &format!("Content-Length: {}\r\n\r\n{body}", body.len());
+        Ok(out.into_bytes())
     }
 
     pub fn body(&self, client: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -182,5 +212,28 @@ pub fn route(client: &mut TcpStream, request: &Request) -> io::Result<()> {
         ("GET", "/info") => respond(client, "200 OK", "application/json", crate::serve::info().to_string().as_bytes()),
         ("POST", "/chat") => chat_turn(client, request),
         _ => respond(client, "404 Not Found", "text/plain", b"not found\n"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn pinned_sets_the_model_and_the_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let body = r#"{"model":"evil/model","x":1}"#;
+        write!(sender, "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let (mut client, _) = listener.accept().unwrap();
+        let request = read_request(&mut client).unwrap().unwrap();
+        let out = String::from_utf8(request.pinned(&mut client, "/m/good").unwrap()).unwrap();
+        let (head, new_body) = out.split_once("\r\n\r\n").unwrap();
+        let parsed: Value = serde_json::from_str(new_body).unwrap();
+        assert_eq!(parsed["model"], "/m/good");
+        assert_eq!(parsed["x"], 1);
+        assert!(head.contains(&format!("Content-Length: {}", new_body.len())));
+        assert_eq!(head.matches("Content-Length").count(), 1);
     }
 }

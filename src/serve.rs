@@ -273,9 +273,14 @@ fn handle(mut client: TcpStream, config: &Config, state: &Arc<Mutex<Backend>>) -
             return web::respond(&mut client, "503 Service Unavailable", "text/plain", body.as_bytes());
         }
     };
+    let model = state.lock().unwrap().model.clone();
+    let forward = match request.pinned(&mut client, &model) {
+        Ok(forward) => forward,
+        Err(e) => return web::respond(&mut client, "400 Bad Request", "text/plain", format!("nibble serve: {e}\n").as_bytes()),
+    };
     let mut server = TcpStream::connect(("127.0.0.1", config.backend_port))?;
     // Pass on what we read while deciding where the request belongs.
-    server.write_all(&request.raw)?;
+    server.write_all(&forward)?;
     let upload = {
         let (client, server) = (client.try_clone()?, server.try_clone()?);
         thread::spawn(move || pipe(client, server))
