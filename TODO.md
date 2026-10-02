@@ -40,10 +40,13 @@
   and the Claude desktop app.
 - Look at the GPUI window: its layout has only been checked through a trace
   and its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories pointed
-  somewhere disposable), never seen. Then give it an .app bundle, so it has a Dock icon and Spotlight
-  can find it.
+  somewhere disposable), never seen.
 - The GPUI input is one line and does not scroll sideways. It needs to grow
-  into a multi-line field. Replies can't be selected or copied yet.
+  into a multi-line field. It has the macOS editing keys (by word, to either
+  end, the Control keys, undo, double-click), but not spell-check, autocorrect
+  or Look Up, which belong to AppKit's text system and are out of reach.
+- Replies have a Copy button, but their text can't be selected.
+- The app bundle has no icon.
 - A licence. `gui/src/input.rs` is adapted from GPUI's Apache-2.0 example.
 - A skill for Claude is not needed so far: the MCP server's `instructions`
   already say when delegation is worth it.

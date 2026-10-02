@@ -540,7 +540,21 @@ impl Nibble {
 
     fn chat_view(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let log = div().id("log").flex_1().overflow_y_scroll().track_scroll(&self.scroll).px_4().children(
-            self.chat.turns.iter().map(|turn| {
+            self.chat.turns.iter().enumerate().map(|(n, turn)| {
+                let answer = turn.answer();
+                // The text can't be selected, so offer the whole reply.
+                let copy = (!answer.trim().is_empty()).then(|| {
+                    div()
+                        .id(("copy", n))
+                        .text_color(theme.dim)
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .hover(|style| style.underline())
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(answer.trim().to_string()));
+                        }))
+                        .child("Copy")
+                });
                 div()
                     .flex()
                     .flex_col()
@@ -558,6 +572,7 @@ impl Nibble {
                             .child(SharedString::from(error.clone()))
                             .into_any_element(),
                     }))
+                    .children(copy.map(|copy| div().flex().child(copy)))
             }),
         );
         let model = if self.model.is_empty() { "a small local model".to_string() } else { self.model.clone() };

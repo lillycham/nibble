@@ -1,7 +1,10 @@
 //! A one-line text field. GPUI has no input widget of its own, so this is
 //! adapted from the `input` example in the GPUI crate (Apache-2.0, Zed
-//! Industries). The changes: colours come from the caller, and the demo view
-//! is gone.
+//! Industries). The changes: colours come from the caller, the demo view is
+//! gone, and it has the editing keys a macOS text field has: movement and
+//! deletion by word and to either end, the Emacs-style Control keys, undo,
+//! and double- and triple-click selection. macOS gives those to its own text
+//! fields for nothing; GPUI draws its own, so each one is written out here.
 
 use std::ops::Range;
 
@@ -30,8 +33,38 @@ actions!(
         Paste,
         Cut,
         Copy,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        SelectToStart,
+        SelectToEnd,
+        DeleteWordLeft,
+        DeleteWordRight,
+        DeleteToStart,
+        DeleteToEnd,
+        Undo,
+        Redo,
     ]
 );
+
+/// Where the word before `offset` starts.
+fn previous_word(text: &str, offset: usize) -> usize {
+    text.unicode_word_indices().rev().map(|(start, _)| start).find(|start| *start < offset).unwrap_or(0)
+}
+
+/// Where the word at or after `offset` ends.
+fn next_word(text: &str, offset: usize) -> usize {
+    text.unicode_word_indices().map(|(start, word)| start + word.len()).find(|end| *end > offset).unwrap_or(text.len())
+}
+
+/// The word, or the run of spaces or punctuation, that `offset` is in.
+fn word_at(text: &str, offset: usize) -> Range<usize> {
+    text.split_word_bound_indices()
+        .map(|(start, piece)| start..start + piece.len())
+        .find(|range| range.end > offset)
+        .unwrap_or(text.len()..text.len())
+}
 
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -46,6 +79,11 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Earlier states to go back to, and undone ones to return to.
+    undo: Vec<(SharedString, Range<usize>)>,
+    redo: Vec<(SharedString, Range<usize>)>,
+    /// The last edit was a typed character, so the next one joins its undo step.
+    typing: bool,
 }
 
 pub fn bind_keys(cx: &mut App) {
@@ -65,6 +103,28 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-left", Home, None),
         KeyBinding::new("cmd-right", End, None),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),
+        // By word and to either end, as in any macOS text field.
+        KeyBinding::new("alt-left", WordLeft, None),
+        KeyBinding::new("alt-right", WordRight, None),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, None),
+        KeyBinding::new("alt-shift-right", SelectWordRight, None),
+        KeyBinding::new("cmd-shift-left", SelectToStart, None),
+        KeyBinding::new("cmd-shift-right", SelectToEnd, None),
+        KeyBinding::new("shift-home", SelectToStart, None),
+        KeyBinding::new("shift-end", SelectToEnd, None),
+        KeyBinding::new("alt-backspace", DeleteWordLeft, None),
+        KeyBinding::new("alt-delete", DeleteWordRight, None),
+        KeyBinding::new("cmd-backspace", DeleteToStart, None),
+        KeyBinding::new("cmd-z", Undo, None),
+        KeyBinding::new("cmd-shift-z", Redo, None),
+        // The Emacs-style keys that macOS text fields also answer to.
+        KeyBinding::new("ctrl-a", Home, None),
+        KeyBinding::new("ctrl-e", End, None),
+        KeyBinding::new("ctrl-b", Left, None),
+        KeyBinding::new("ctrl-f", Right, None),
+        KeyBinding::new("ctrl-d", Delete, None),
+        KeyBinding::new("ctrl-h", Backspace, None),
+        KeyBinding::new("ctrl-k", DeleteToEnd, None),
     ]);
 }
 
@@ -82,6 +142,9 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            typing: false,
         }
     }
 
@@ -159,6 +222,72 @@ impl TextInput {
         self.replace_text_in_range(None, "", window, cx)
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(previous_word(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(next_word(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(previous_word(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(next_word(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_to_start(&mut self, _: &SelectToStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_to_end(&mut self, _: &SelectToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    /// Delete from the cursor to `offset`, or the selection if there is one.
+    fn delete_to(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.select_to(offset, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(previous_word(&self.content, self.cursor_offset()), window, cx);
+    }
+
+    fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(next_word(&self.content, self.cursor_offset()), window, cx);
+    }
+
+    fn delete_to_start(&mut self, _: &DeleteToStart, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(0, window, cx);
+    }
+
+    fn delete_to_end(&mut self, _: &DeleteToEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(self.content.len(), window, cx);
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((content, selection)) = self.undo.pop() {
+            self.redo.push((std::mem::replace(&mut self.content, content), self.selected_range.clone()));
+            self.selected_range = selection;
+            self.typing = false;
+            cx.notify();
+        }
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((content, selection)) = self.redo.pop() {
+            self.undo.push((std::mem::replace(&mut self.content, content), self.selected_range.clone()));
+            self.selected_range = selection;
+            self.typing = false;
+            cx.notify();
+        }
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -167,7 +296,15 @@ impl TextInput {
     ) {
         self.is_selecting = true;
 
-        if event.modifiers.shift {
+        if event.click_count >= 3 {
+            self.selection_reversed = false;
+            self.selected_range = 0..self.content.len();
+            cx.notify();
+        } else if event.click_count == 2 {
+            self.selection_reversed = false;
+            self.selected_range = word_at(&self.content, self.index_for_mouse_position(event.position));
+            cx.notify();
+        } else if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
         } else {
             self.move_to(self.index_for_mouse_position(event.position), cx)
@@ -320,6 +457,9 @@ impl TextInput {
         self.last_layout = None;
         self.last_bounds = None;
         self.is_selecting = false;
+        self.undo.clear();
+        self.redo.clear();
+        self.typing = false;
     }
 }
 
@@ -374,6 +514,16 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+
+        // One undo step per run of typing, and one per other edit. Text that
+        // an input method is still composing is not a step of its own.
+        let typed = range.is_empty() && new_text.chars().count() == 1 && !new_text.contains(' ');
+        if self.marked_range.is_none() && !(typed && self.typing) {
+            self.undo.push((self.content.clone(), self.selected_range.clone()));
+            self.undo.drain(..self.undo.len().saturating_sub(100));
+        }
+        self.redo.clear();
+        self.typing = typed;
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -648,6 +798,18 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::select_to_start))
+            .on_action(cx.listener(Self::select_to_end))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::delete_to_start))
+            .on_action(cx.listener(Self::delete_to_end))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -660,5 +822,29 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_are_found_the_way_a_text_field_finds_them() {
+        let text = "read the file, s\u{2019}il vous pla\u{ee}t";
+        //          0    5   9
+        assert_eq!(previous_word(text, 9), 5);
+        assert_eq!(previous_word(text, 7), 5);
+        assert_eq!(previous_word(text, 5), 0);
+        assert_eq!(previous_word(text, 0), 0);
+        assert_eq!(next_word(text, 0), 4);
+        assert_eq!(next_word(text, 4), 8);
+        // Past the comma and the space to the end of the next word.
+        assert_eq!(&text[..next_word(text, 13)], "read the file, s\u{2019}il");
+        assert_eq!(next_word(text, text.len()), text.len());
+        // A double click takes the word under it, or the gap between words.
+        assert_eq!(&text[word_at(text, 6)], "the");
+        assert_eq!(&text[word_at(text, 4)], " ");
+        assert_eq!(word_at(text, text.len()), text.len()..text.len());
     }
 }
