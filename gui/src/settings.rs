@@ -79,6 +79,18 @@ pub fn load() -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// The grey text of an empty field: the value the server really uses, or the
+/// field's own hint while the server has not said. The token is never shown.
+pub fn in_use(field: &Field, effective: &Map<String, Value>) -> String {
+    match field.kind {
+        Kind::Secret => field.hint.to_string(),
+        _ => match show(field, effective) {
+            value if value.is_empty() => field.hint.to_string(),
+            value => format!("in use: {value}"),
+        },
+    }
+}
+
 /// What to put in a field for the value in the file.
 pub fn show(field: &Field, settings: &Map<String, Value>) -> String {
     let Some(value) = settings.get(field.key) else { return String::new() };
@@ -136,6 +148,16 @@ mod tests {
 
     fn field(key: &str) -> &'static Field {
         FIELDS.iter().find(|field| field.key == key).unwrap()
+    }
+
+    #[test]
+    fn empty_fields_show_the_value_in_use() {
+        let effective: Map<String, Value> = serde_json::from_str(r#"{ "max_calls": 6, "tools": true, "roots": [] }"#).unwrap();
+        assert_eq!(in_use(field("max_calls"), &effective), "in use: 6");
+        assert_eq!(in_use(field("tools"), &effective), "in use: on");
+        // Nothing to say, or an empty value: the field's own hint stays.
+        assert_eq!(in_use(field("roots"), &effective), field("roots").hint);
+        assert_eq!(in_use(field("prompt"), &effective), field("prompt").hint);
     }
 
     #[test]

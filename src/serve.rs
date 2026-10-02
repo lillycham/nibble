@@ -245,6 +245,16 @@ pub fn info() -> Value {
     json!({ "model": config.model_name, "models": models, "tools": web::tools_allowed(), "version": env!("CARGO_PKG_VERSION") })
 }
 
+/// What `GET /settings` says: the settings in use, with the presets for the
+/// model applied and the folders and tools as `serve` settled on them. The
+/// token stays hidden. It needs the token, because it names folders.
+pub fn effective() -> Value {
+    let mut settings = crate::config::get().to_json();
+    settings["roots"] = json!(web::roots());
+    settings["tools"] = json!(web::tools_allowed());
+    settings
+}
+
 fn pipe(mut from: TcpStream, mut to: TcpStream) {
     let _ = io::copy(&mut from, &mut to);
     let _ = to.shutdown(Shutdown::Write);
@@ -352,6 +362,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
         eprintln!("nibble serve: chats have no file tools; set \"roots\" in the config file to give them some");
     }
     web::allow_tools(!roots.is_empty());
+    web::set_roots(roots.iter().map(|root| root.display().to_string()).collect());
 
     for sig in [SIGHUP, SIGINT, SIGTERM] {
         unsafe { signal(sig, stop) };

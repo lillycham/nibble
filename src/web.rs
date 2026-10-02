@@ -24,6 +24,17 @@ pub fn allow_tools(allow: bool) {
     let _ = TOOLS.set(allow);
 }
 
+/// The folders chats may read, as `serve` settled on them.
+static ROOTS: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn set_roots(roots: Vec<String>) {
+    let _ = ROOTS.set(roots);
+}
+
+pub fn roots() -> &'static [String] {
+    ROOTS.get().map_or(&[], Vec::as_slice)
+}
+
 pub fn tools_allowed() -> bool {
     config::get().tools && TOOLS.get().copied().unwrap_or(false)
 }
@@ -210,6 +221,7 @@ pub fn route(client: &mut TcpStream, request: &Request) -> io::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => respond(client, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes()),
         ("GET", "/info") => respond(client, "200 OK", "application/json", crate::serve::info().to_string().as_bytes()),
+        ("GET", "/settings") => respond(client, "200 OK", "application/json", crate::serve::effective().to_string().as_bytes()),
         ("POST", "/chat") => chat_turn(client, request),
         _ => respond(client, "404 Not Found", "text/plain", b"not found\n"),
     }

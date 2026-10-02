@@ -19,7 +19,7 @@ use gpui::{
     TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div,
     prelude::*, px, rgb, size,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use input::TextInput;
 use settings::{FIELDS, Kind};
@@ -91,6 +91,16 @@ impl Server {
     fn models(&self) -> Option<Models> {
         let mut response = self.agent(3).get(format!("{}/info", self.url)).call().ok()?;
         Models::from(&serde_json::from_str(&response.body_mut().read_to_string().ok()?).ok()?)
+    }
+
+    /// The settings the server really uses, if it will say.
+    fn effective(&self) -> Option<Map<String, Value>> {
+        let mut get = self.agent(3).get(format!("{}/settings", self.url));
+        if !self.token.is_empty() {
+            get = get.header("Authorization", format!("Bearer {}", self.token));
+        }
+        let mut response = get.call().ok().filter(|response| response.status() == 200)?;
+        serde_json::from_str::<Value>(&response.body_mut().read_to_string().ok()?).ok()?.as_object().cloned()
     }
 
     /// Ask the server to run another model from the next message on.
@@ -199,6 +209,8 @@ struct Nibble {
     // value picked. A message from the last save, and whether it is an error.
     fields: Vec<Entity<TextInput>>,
     choices: Vec<String>,
+    /// What an empty field shows in grey, for each field.
+    hints: Vec<String>,
     notice: Option<(bool, String)>,
 }
 
@@ -224,6 +236,7 @@ impl Nibble {
             epoch: 0,
             fields,
             choices: vec![String::new(); FIELDS.len()],
+            hints: FIELDS.iter().map(|field| field.hint.to_string()).collect(),
             notice: None,
         };
         nibble.find_model(cx);
@@ -421,11 +434,11 @@ impl Nibble {
         for (n, field) in FIELDS.iter().enumerate() {
             let shown = settings::show(field, &saved);
             let hint = match field.kind {
-                Kind::Secret if saved.contains_key(field.key) => "set; type to replace it",
-                _ => field.hint,
+                Kind::Secret if saved.contains_key(field.key) => "set; type to replace it".to_string(),
+                _ => self.hints[n].clone(),
             };
             self.fields[n].update(cx, |input, cx| {
-                input.set_placeholder(hint);
+                input.set_placeholder(&hint);
                 input.set_text(&shown, cx);
             });
             self.choices[n] = shown;
@@ -433,7 +446,34 @@ impl Nibble {
         self.notice = settings::managed()
             .then(|| (false, "This file is managed by Nix, so it can't be changed from here.".to_string()));
         self.view = View::Settings;
+        self.find_in_use(cx);
         cx.notify();
+    }
+
+    /// Ask the server for the settings it uses, and show them in the empty fields.
+    fn find_in_use(&mut self, cx: &mut Context<Self>) {
+        let server = self.server.clone();
+        let (send, mut receive) = mpsc::unbounded();
+        std::thread::spawn(move || {
+            let _ = send.unbounded_send(server.effective());
+        });
+        cx.spawn(async move |this, cx| {
+            if let Some(Some(effective)) = receive.next().await {
+                let _ = this.update(cx, |nibble, cx| {
+                    let saved = settings::load();
+                    for (n, field) in FIELDS.iter().enumerate() {
+                        nibble.hints[n] = settings::in_use(field, &effective);
+                        if field.kind == Kind::Secret && saved.contains_key(field.key) {
+                            continue;
+                        }
+                        let hint = nibble.hints[n].clone();
+                        nibble.fields[n].update(cx, |input, _| input.set_placeholder(&hint));
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn save_settings(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -777,7 +817,7 @@ impl Nibble {
             let control = match field.kind {
                 Kind::Choice(_) => {
                     let picked = &self.choices[n];
-                    let label = if picked.is_empty() { field.hint.to_string() } else { picked.clone() };
+                    let label = if picked.is_empty() { self.hints[n].clone() } else { picked.clone() };
                     button(("choice", n), label, theme)
                         .when(picked.is_empty(), |button| button.text_color(theme.dim))
                         .on_click(cx.listener(move |nibble, _, _, cx| nibble.cycle(n, cx)))
