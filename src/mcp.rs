@@ -20,8 +20,8 @@ Runs an MCP server on stdin and stdout, with the tools `delegate` and `map`.
 
   --root DIR    a directory the tools may read inside; may be given more than once
 
-Without --root, the roots come from the \"roots\" setting, and failing that
-from the directory nibble was started in.";
+Without --root, the roots are the directory nibble was started in (unless
+that is /) and the \"roots\" setting.";
 
 // Sent to the client once, at the start. This is where Claude learns when
 // delegation is worth it.
@@ -256,17 +256,26 @@ fn roots(mut args: impl Iterator<Item = String>) -> Result<Option<Vec<PathBuf>>,
             _ => return Err(format!("unknown option {arg}").into()),
         }
     }
-    if roots.is_empty() {
-        roots = config::get().roots.clone();
-    }
+    let given = !roots.is_empty();
     let mut roots: Vec<PathBuf> = roots.iter().map(|root| tools::expand(root)).collect();
-    if roots.is_empty() {
-        roots.push(std::env::current_dir()?);
+    if !given {
+        // The directory we were started in, then the configured roots. Claude
+        // Code starts its servers in the project, so the project comes first
+        // and relative paths in a call mean what Claude expects. The Claude
+        // desktop app starts them in /, which is no project, so it is left out.
+        roots.extend(std::env::current_dir().ok().filter(|dir| dir.parent().is_some()));
+        roots.extend(config::get().roots.iter().map(|root| tools::expand(root)));
     }
-    // The Claude desktop app starts its servers in /. Reading the whole disk
-    // must be something the user asked for, not a default.
-    if roots.iter().any(|root| root.parent().is_none()) {
-        return Err("refusing to use / as a root; set \"roots\" in the config file or pass --root DIR".into());
+    if roots.is_empty() {
+        return Err("nowhere to read: started in / with no roots. Set \"roots\" in the config file or pass --root DIR".into());
+    }
+    // Reading the whole disk must be something the user asked for in so many
+    // words. Check the real path, so that "." in / or a link to / counts too.
+    for root in &roots {
+        let real = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+        if real.parent().is_none() {
+            return Err("refusing to use / as a root".into());
+        }
     }
     Ok(Some(roots))
 }
