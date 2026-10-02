@@ -147,13 +147,18 @@ pub fn expand(path: &str) -> PathBuf {
 /// Turn a path from the model or from Claude into one we may read.
 pub fn resolve(path: &str) -> Result<PathBuf, String> {
     let mut path = expand(path);
-    // The model is told the name of the directory it is in, and sometimes
-    // starts its paths with that name. Take it as meant.
+    // Models invent a directory in front of a real path: one wrote
+    // nibble/flake.nix, another /nix/flake.nix and /current_directory/TODO.md.
+    // If the path as given does not exist but its tail does, take the tail.
+    // The reply names the path that was read, so the model sees the correction.
     if !path.exists() {
-        if let (Ok(here), Some(first)) = (std::env::current_dir(), path.components().next()) {
-            if here.file_name() == Some(first.as_os_str()) {
-                path = Path::new(".").join(path.components().skip(1).collect::<PathBuf>());
-            }
+        let parts: Vec<_> = path.components().filter(|part| matches!(part, std::path::Component::Normal(_))).collect();
+        let tail = (1..parts.len()).map(|skip| parts[skip..].iter().collect::<PathBuf>()).find(|tail| tail.exists());
+        if let Some(tail) = tail {
+            path = tail;
+        } else if path.is_absolute() && parts.len() == 1 {
+            // A made-up name for "the directory I am in".
+            path = PathBuf::from(".");
         }
     }
     if !roots().is_empty() {
@@ -431,7 +436,7 @@ mod tests {
         assert!(call("search", &json!({ "text": "hidden" })).starts_with("no matches"));
         // Words match in any order, and the directory's own name is forgiven.
         fs::write(inside.join("notes.txt"), "the server stops when idle\nstops for lunch\n").unwrap();
-        let hits = call("search", &json!({ "text": "idle server", "path": "in" }));
+        let hits = call("search", &json!({ "text": "idle server", "path": "/made_up_root" }));
         assert!(hits.contains("notes.txt:1:") && !hits.contains("lunch"), "{hits}");
         assert!(call("search", &json!({ "text": "idle server banana" })).starts_with("No line has all"));
         // A right name behind a wrong directory gets pointed to the real file.
@@ -439,6 +444,9 @@ mod tests {
         fs::write(inside.join("sub/deep.txt"), "x\n").unwrap();
         let wrong = call("read_file", &json!({ "path": "nowhere/deep.txt" }));
         assert!(wrong.starts_with("error:") && wrong.contains("sub/deep.txt"), "{wrong}");
+        // An invented directory in front of a real path is dropped.
+        assert!(call("read_file", &json!({ "path": "/current_directory/sub/deep.txt" })).starts_with("sub/deep.txt"));
+        assert!(call("read_file", &json!({ "path": "in/ok.txt" })).contains("fine"));
 
         fs::remove_dir_all(&base).unwrap();
     }

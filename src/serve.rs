@@ -174,7 +174,7 @@ fn pipe(mut from: TcpStream, mut to: TcpStream) {
 
 fn handle(mut client: TcpStream, config: &Config, state: &Arc<Mutex<Backend>>) -> io::Result<()> {
     let Some(request) = web::read_request(&mut client)? else { return Ok(()) };
-    if !request.is_page() && !request.authorized() {
+    if !request.is_public() && !request.authorized() {
         // Take the body first. Closing on a client that is still sending
         // gives it a connection reset in place of the answer.
         let _ = request.body(&mut client);

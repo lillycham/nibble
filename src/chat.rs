@@ -22,6 +22,12 @@ question your first step is always a tool call: search for a key word from the q
 list_dir. Never say that you lack information before you have searched, and never ask the user \
 which file to look at. When the input already holds everything you need, answer without tools.";
 
+// For a model that reaches for its tools readily, and needs holding back.
+const SYSTEM_TOOLS_LIGHT: &str = " You have tools that read and search files in the current \
+directory. Use them when the question is about those files, and stop as soon as you can answer: \
+two or three calls are usually enough. When the input already holds everything you need, answer \
+without tools.";
+
 pub const SYSTEM_CLAUDE: &str = " If the task is too hard for you, call ask_claude with a complete \
 question, then pass on its answer.";
 
@@ -32,10 +38,13 @@ pub fn system() -> &'static str {
 }
 
 /// What is added when the model has file tools: the "system_tools" setting,
-/// or the built-in text.
+/// or the built-in text that the "prompt" setting picks.
 pub fn system_tools() -> String {
-    let custom = &config::get().system_tools;
-    if custom.is_empty() { SYSTEM_TOOLS.to_string() } else { format!(" {custom}") }
+    let config = config::get();
+    if !config.system_tools.is_empty() {
+        return format!(" {}", config.system_tools);
+    }
+    if config.prompt == "light" { SYSTEM_TOOLS_LIGHT } else { SYSTEM_TOOLS }.to_string()
 }
 
 /// Add the tool calls in one streamed chunk to those collected so far.
@@ -244,12 +253,19 @@ pub fn run(
     max_tokens: u32,
     events: &mut dyn Events,
 ) -> Result<Outcome, Box<dyn Error>> {
-    let max_steps = config::get().max_steps;
+    let (max_steps, max_calls) = (config::get().max_steps, config::get().max_calls);
     let mut made = Vec::new();
+    let (mut count, mut told) = (0, false);
     let mut step = 0;
     loop {
-        let exhausted = step >= max_steps;
+        let exhausted = step >= max_steps || count >= max_calls;
         let offered = if exhausted { &[] } else { tools };
+        if exhausted && !told {
+            // Say so in words. With the tools just gone, some models reply
+            // with nothing at all.
+            messages.push(message("user", "You have no tool calls left. Answer the question now, from what you have read."));
+            told = true;
+        }
         let (reply, mut calls) = request(messages, offered, max_tokens, events)?;
         if calls.is_empty() {
             messages.push(message("assistant", &reply));
@@ -271,7 +287,10 @@ pub fn run(
             // A model that gets an error often makes the very same call again,
             // and can spend every round that way. Tell it instead of obeying.
             let this = (name.to_string(), arguments.clone());
-            let result = if made.contains(&this) {
+            count += 1;
+            let result = if count > max_calls {
+                "error: no tool calls left for this question. Answer now with what you have.".to_string()
+            } else if made.contains(&this) {
                 "error: you already made this exact call. Try something different, or answer with what you have.".to_string()
             } else {
                 made.push(this);

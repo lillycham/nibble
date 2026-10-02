@@ -25,6 +25,14 @@ pub struct Config {
     pub map_file_chars: usize,
     pub map_max_tokens: u32,
     pub claude_command: String,
+    /// The name of the model in use, when it could be found out. Not a setting:
+    /// it comes from `model`, or from asking the server.
+    pub model_name: String,
+    /// Which built-in tools prompt to use: "firm" for a model that is slow
+    /// to use its tools, "light" for one that is quick to.
+    pub prompt: String,
+    /// The most tool calls in one turn, however many rounds they take.
+    pub max_calls: usize,
     /// Whether to offer the model tools at all. Turn it off for a model with
     /// no tool-call format: told to use tools it can't call, it writes
     /// make-believe calls as its answer.
@@ -64,6 +72,9 @@ impl Default for Config {
             map_file_chars: 8_000,
             map_max_tokens: 100,
             claude_command: "claude".into(),
+            model_name: String::new(),
+            prompt: "firm".into(),
+            max_calls: 12,
             tools: true,
             system: String::new(),
             system_tools: String::new(),
@@ -105,6 +116,12 @@ impl Config {
             "map_max_tokens" => number(value).map(|v| self.map_max_tokens = v),
             "claude_command" => text(value).map(|v| self.claude_command = v),
             "tools" => value.as_bool().map(|v| self.tools = v),
+            "prompt" => match value.as_str() {
+                Some("firm" | "light") => text(value).map(|v| self.prompt = v),
+                Some(other) => return Err(format!("\"prompt\" must be \"firm\" or \"light\", not \"{other}\"")),
+                None => None,
+            },
+            "max_calls" => number(value).map(|v| self.max_calls = v),
             "system" => text(value).map(|v| self.system = v),
             "system_tools" => text(value).map(|v| self.system_tools = v),
             "roots" => list(value).map(|v| self.roots = v),
@@ -134,6 +151,8 @@ impl Config {
             "map_max_tokens": self.map_max_tokens,
             "claude_command": self.claude_command,
             "tools": self.tools,
+            "prompt": self.prompt,
+            "max_calls": self.max_calls,
             "system": self.system,
             "system_tools": self.system_tools,
             "roots": self.roots,
@@ -157,28 +176,90 @@ pub fn path() -> Option<PathBuf> {
         .or_else(|| var("HOME").map(|dir| dir.join(".config/nibble/config.json")))
 }
 
-fn load() -> Result<Config, String> {
-    let mut config = Config::default();
+/// What we know about particular models: only the settings that should differ
+/// from the defaults, and only for models someone has actually run. The
+/// pattern is looked for in the model's name, ignoring case. A "models"
+/// section in the config file has the same form, is applied later, and wins.
+const KNOWN_MODELS: [(&str, &str); 2] = [
+    // No tool-call format. Offered tools, it writes make-believe calls.
+    ("gemma-3n", r#"{ "tools": false }"#),
+    // Eager with tools, where the default prompt is written for the reluctant.
+    // It also reads far more than it needs, and each read slows the next
+    // round, so keep its results short and its calls few.
+    ("lfm2", r#"{ "prompt": "light", "max_calls": 6, "result_chars": 4000 }"#),
+];
+
+/// Ask `nibble serve` which model it runs. Quietly gives up on any other
+/// server, and on none at all.
+fn served_model(url: &str) -> Option<String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(2)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut response = agent.get(format!("{url}/info")).call().ok()?;
+    let info: Value = serde_json::from_str(&response.body_mut().read_to_string().ok()?).ok()?;
+    info["model"].as_str().map(str::to_string)
+}
+
+/// `flag_model` is a model named on the command line. `ask_server` says
+/// whether to ask the server for its model when nothing else names one.
+fn load(flag_model: Option<String>, ask_server: bool) -> Result<Config, String> {
+    let mut file = serde_json::Map::new();
+    let mut source = String::new();
     if let Some(path) = path() {
         match std::fs::read_to_string(&path) {
             Ok(text) => {
-                let name = path.display();
-                let file: Value = serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))?;
-                let settings = file.as_object().ok_or(format!("{name}: expected a JSON object"))?;
-                for (key, value) in settings {
-                    config.set(key, value).map_err(|e| format!("{name}: {e}"))?;
-                }
+                source = format!("{}: ", path.display());
+                let parsed: Value = serde_json::from_str(&text).map_err(|e| format!("{source}{e}"))?;
+                file = parsed.as_object().ok_or(format!("{source}expected a JSON object"))?.clone();
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("{}: {e}", path.display())),
         }
     }
-    let vars =
-        [("NIBBLE_URL", "url"), ("NIBBLE_MODEL", "model"), ("NIBBLE_CLAUDE", "claude_command"), ("NIBBLE_TOKEN", "token")];
+    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let setting = |key: &str| file.get(key).and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_string);
+
+    // The model has to be known first, because it decides which presets apply.
+    let mut model = flag_model.clone().or_else(|| var("NIBBLE_MODEL")).or_else(|| setting("model")).unwrap_or_default();
+    if model.is_empty() && ask_server {
+        let url = var("NIBBLE_URL").or_else(|| setting("url")).unwrap_or_else(|| Config::default().url);
+        model = served_model(&url).unwrap_or_default();
+    }
+    let name = model.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string();
+    let matches = |pattern: &str| !name.is_empty() && name.to_lowercase().contains(&pattern.to_lowercase());
+
+    let mut config = Config { model_name: name.clone(), ..Config::default() };
+    for (pattern, preset) in KNOWN_MODELS {
+        if matches(pattern) {
+            let preset: Value = serde_json::from_str(preset).expect("built-in preset is valid JSON");
+            for (key, value) in preset.as_object().into_iter().flatten() {
+                config.set(key, value)?;
+            }
+        }
+    }
+    for (key, value) in file.iter().filter(|(key, _)| *key != "models") {
+        config.set(key, value).map_err(|e| format!("{source}{e}"))?;
+    }
+    if let Some(models) = file.get("models") {
+        let models = models.as_object().ok_or(format!("{source}\"models\" must be an object"))?;
+        for (pattern, settings) in models.iter().filter(|(pattern, _)| matches(pattern)) {
+            let settings = settings.as_object().ok_or(format!("{source}models.{pattern} must be an object"))?;
+            for (key, value) in settings {
+                config.set(key, value).map_err(|e| format!("{source}models.{pattern}: {e}"))?;
+            }
+        }
+    }
+
+    let vars = [("NIBBLE_URL", "url"), ("NIBBLE_CLAUDE", "claude_command"), ("NIBBLE_TOKEN", "token")];
     for (name, key) in vars {
-        if let Ok(value) = std::env::var(name) {
+        if let Some(value) = var(name) {
             config.set(key, &value.into())?;
         }
+    }
+    if let Some(model) = flag_model.or_else(|| var("NIBBLE_MODEL")) {
+        config.model = model;
     }
     if config.token.is_empty() && !config.token_file.is_empty() {
         let file = crate::tools::expand(&config.token_file);
@@ -191,8 +272,8 @@ fn load() -> Result<Config, String> {
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 /// Read the config file. Call once, before anything uses `get`.
-pub fn init() -> Result<(), String> {
-    let config = load()?;
+pub fn init(flag_model: Option<String>, ask_server: bool) -> Result<(), String> {
+    let config = load(flag_model, ask_server)?;
     CONFIG.set(config).map_err(|_| "config loaded twice".to_string())
 }
 
@@ -216,5 +297,12 @@ mod tests {
         assert!(config.set("map_max_file", &json!(5)).is_err());
         assert!(config.set("max_tokens", &json!("many")).is_err());
         assert!(config.set("backend_port", &json!(70000)).is_err());
+        assert!(config.set("prompt", &json!("shouty")).is_err());
+        for (_, preset) in KNOWN_MODELS {
+            let preset: Value = serde_json::from_str(preset).unwrap();
+            for (key, value) in preset.as_object().unwrap() {
+                config.set(key, value).unwrap();
+            }
+        }
     }
 }

@@ -137,12 +137,21 @@ fn show_config() {
         Some(path) => eprintln!("config file: {} (not there; these are the defaults)", path.display()),
         None => eprintln!("config file: none, because HOME is not set"),
     }
+    match config::get().model_name.as_str() {
+        "" => eprintln!("model: unknown, so no per-model presets apply"),
+        name => eprintln!("model: {name}"),
+    }
     println!("{:#}", config::get().to_json());
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    config::init()?;
-    let mut argv = std::env::args().skip(1).peekable();
+    // The model decides which presets apply, so find it before the settings
+    // are read: `serve` may name it with a flag, and the others ask the server.
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    let serving = all.first().is_some_and(|mode| mode == "serve");
+    let flag_model = all.iter().position(|arg| arg == "--model").and_then(|at| all.get(at + 1)).cloned();
+    config::init(flag_model.filter(|_| serving), !serving)?;
+    let mut argv = all.into_iter().peekable();
     match argv.peek().map(String::as_str) {
         Some("serve") => return serve::run(argv.skip(1)),
         Some("mcp") => return mcp::run(argv.skip(1)),
