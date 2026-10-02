@@ -1,6 +1,9 @@
 //! A one-line text field. GPUI has no input widget of its own, so this is
-//! adapted from the `input` example in the GPUI crate (Apache-2.0, Zed
-//! Industries). The changes: colours come from the caller, the demo view is
+//! adapted from the `input` example in the GPUI crate, which is copyright
+//! Zed Industries, Inc. and licensed under the Apache License 2.0. A copy of
+//! that licence is in gui/LICENSE-APACHE. The rest of nibble is MIT.
+//!
+//! The changes from the example: colours come from the caller, the demo view is
 //! gone, and it has the editing keys a macOS text field has: movement and
 //! deletion by word and to either end, the Emacs-style Control keys, undo,
 //! and double- and triple-click selection. macOS gives those to its own text

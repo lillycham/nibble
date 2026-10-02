@@ -101,7 +101,11 @@
           postFixup = pkgs.lib.optionalString (appleSilicon pkgs) ''
             wrapProgram $out/bin/nibble --suffix PATH : ${mlxServer pkgs}/bin
           '';
-          meta.mainProgram = "nibble";
+          meta = {
+            description = "A small local-model harness for tasks that don't need a big agent";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "nibble";
+          };
         };
         default = nibble;
       } // pkgs.lib.optionalAttrs (appleSilicon pkgs) {
@@ -139,7 +143,12 @@
             </plist>
             EOF
           '';
-          meta.mainProgram = "nibble-gui";
+          meta = {
+            description = "A native chat window for nibble";
+            # One file is adapted from GPUI's Apache-2.0 example.
+            license = with pkgs.lib.licenses; [ mit asl20 ];
+            mainProgram = "nibble-gui";
+          };
         };
       });
 

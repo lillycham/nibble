@@ -3,6 +3,8 @@ name = "nibble-gui"
 version = "0.1.0"
 edition = "2024"
 description = "A native chat window for nibble"
+# MIT, except src/input.rs, which is adapted from Apache-2.0 code.
+license = "MIT AND Apache-2.0"
 
 # Its own project, not a workspace member, so the CLI keeps its two
 # dependencies and its small lock file.
