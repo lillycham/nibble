@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -40,6 +41,7 @@ With no prompt and no pipe, nibble starts a chat.
   -n, --max-tokens N    reply length limit (default 1024)
       --no-tools        don't let the model read files
       --no-claude       don't let the model ask Claude for help
+      --anywhere        let the model read files outside the current directory
 
 The model can read and search files but can't change anything.
 
@@ -55,7 +57,7 @@ struct Args {
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, Box<dyn Error>> {
     let mut system = None;
     let mut max_tokens = 1024;
-    let (mut tools, mut claude) = (true, tools::claude_allowed());
+    let (mut tools, mut claude, mut confined) = (true, tools::claude_allowed(), true);
     let mut words = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -64,8 +66,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, Bo
             "-n" | "--max-tokens" => max_tokens = args.next().ok_or("-n needs a value")?.parse()?,
             "--no-tools" => tools = false,
             "--no-claude" => claude = false,
+            "--anywhere" => confined = false,
             _ => words.push(arg),
         }
+    }
+    if tools && confined {
+        tools::confine()?;
     }
     let system = system.unwrap_or_else(|| {
         let mut system = SYSTEM.to_string();
@@ -139,9 +145,17 @@ fn request(messages: &[Value], tools: &[Value], max_tokens: u32) -> Result<(Stri
         body["tools"] = tools.into();
     }
 
-    let mut response = ureq::post(format!("{url}/v1/chat/completions"))
+    // Fail with a message instead of waiting for ever. The response limit is
+    // long because a cold start has to load the model first.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_recv_response(Some(Duration::from_secs(300)))
+        .build()
+        .into();
+    let mut response = agent
+        .post(format!("{url}/v1/chat/completions"))
         .send_json(&body)
-        .map_err(|e| format!("can't reach the model server at {url}: {e}"))?;
+        .map_err(|e| format!("no answer from the model server at {url}: {e}"))?;
 
     let mut out = io::stdout().lock();
     let mut reply = String::new();

@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
@@ -81,12 +82,34 @@ fn text_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     }
 }
 
-fn path_arg(args: &Value) -> PathBuf {
+/// The directory the file tools may read inside, or None for anywhere.
+static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Keep the file tools inside the current directory. Without this call they
+/// can read anything the user can.
+pub fn confine() -> Result<(), String> {
+    let root = std::env::current_dir().and_then(fs::canonicalize).map_err(|e| format!("current directory: {e}"))?;
+    ROOT.set(Some(root)).map_err(|_| "already confined".to_string())
+}
+
+fn root() -> Option<&'static PathBuf> {
+    ROOT.get().and_then(Option::as_ref)
+}
+
+fn path_arg(args: &Value) -> Result<PathBuf, String> {
     let path = args["path"].as_str().filter(|p| !p.is_empty()).unwrap_or(".");
-    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+    let path = match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => Path::new(&home).join(rest),
         _ => PathBuf::from(path),
+    };
+    if let Some(root) = root() {
+        // Canonical form, so neither .. nor a symlink can lead outside.
+        let real = fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !real.starts_with(root) {
+            return Err(format!("{} is outside {}, and you may only read inside it", path.display(), root.display()));
+        }
     }
+    Ok(path)
 }
 
 /// Small models sometimes send numbers as strings.
@@ -113,7 +136,7 @@ fn read_text(path: &Path) -> Result<String, String> {
 
 fn read_file(args: &Value) -> Result<String, String> {
     text_arg(args, "path")?;
-    let path = path_arg(args);
+    let path = path_arg(args)?;
     let text = read_text(&path)?;
     let total = text.lines().count();
     let start = number_arg(args, "start_line").unwrap_or(1).max(1);
@@ -170,11 +193,22 @@ pub fn context() -> String {
     let mut names = entries(&dir).unwrap_or_default();
     let more = if names.len() > 40 { " ..." } else { "" };
     names.truncate(40);
-    format!("\n\nCurrent directory: {}\nIts contents: {}{more}", dir.display(), names.join(" "))
+    let reach = match root() {
+        Some(_) => "You may only read files inside it.",
+        None => "Files outside it are also yours to read: give the full path, such as /etc/hosts.",
+    };
+    // Only the directory's own name: the model miscopies long absolute paths,
+    // and relative ones cost fewer tokens.
+    let name = dir.file_name().unwrap_or(dir.as_os_str()).to_string_lossy();
+    format!(
+        "\n\nYou are in the directory \"{name}\". Use relative paths such as src/main.rs. {reach}\n\
+         Its contents: {}{more}",
+        names.join(" ")
+    )
 }
 
 fn list_dir(args: &Value) -> Result<String, String> {
-    let path = path_arg(args);
+    let path = path_arg(args)?;
     let mut names = entries(&path)?;
     let total = names.len();
     names.truncate(MAX_ENTRIES);
@@ -221,7 +255,7 @@ fn search_dir(dir: &Path, needle: &str, matches: &mut Vec<String>) {
 
 fn search(args: &Value) -> Result<String, String> {
     let needle = text_arg(args, "text")?.to_lowercase();
-    let path = path_arg(args);
+    let path = path_arg(args)?;
     let mut matches = Vec::new();
     if path.is_dir() {
         search_dir(&path, &needle, &mut matches);
@@ -263,4 +297,38 @@ fn ask_claude(args: &Value) -> Result<String, String> {
     }
     let answer = String::from_utf8_lossy(&output.stdout);
     Ok(clip(answer.trim(), RESULT_BUDGET).to_string() + "\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One test, because the confinement root and the current directory are
+    // both process-wide.
+    #[test]
+    fn confined_reads_stay_inside() {
+        let base = std::env::temp_dir().join(format!("nibble-test-{}", std::process::id()));
+        let (inside, outside) = (base.join("in"), base.join("out"));
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(inside.join("ok.txt"), "fine\n").unwrap();
+        fs::write(outside.join("secret.txt"), "hidden words\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), inside.join("link.txt")).unwrap();
+        std::env::set_current_dir(&inside).unwrap();
+        confine().unwrap();
+
+        let read = |path: &str| call("read_file", &json!({ "path": path }));
+        assert!(read("ok.txt").contains("fine"));
+        let absolute = outside.join("secret.txt");
+        for path in ["../out/secret.txt", "link.txt", absolute.to_str().unwrap()] {
+            let result = read(path);
+            assert!(result.starts_with("error:") && !result.contains("hidden words"), "{path}: {result}");
+        }
+        assert!(call("list_dir", &json!({ "path": ".." })).starts_with("error:"));
+        assert!(call("search", &json!({ "text": "hidden", "path": "../out" })).starts_with("error:"));
+        // The walk must not follow the symlink out either.
+        assert_eq!(call("search", &json!({ "text": "hidden" })), "no matches\n");
+
+        fs::remove_dir_all(&base).unwrap();
+    }
 }
