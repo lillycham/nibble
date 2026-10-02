@@ -30,14 +30,17 @@
 - In the window: a sidebar that lists saved chats (one JSON file each under
   `~/.local/share/nibble/chats`), and a settings page that edits the shared
   config file and leaves keys it has no field for alone.
+- Published at github.com/lillycham/nibble (MIT), and packaged in
+  lillycham/nur-packages as `nibble`, `nibble-gui` and `nibble-mlx-server`.
+  The MLX wheel recipe is in both places, so bump both.
+- In use on mirai: the module in `~/nixfiles`, and `nibble mcp` registered
+  with Claude Code and the Claude desktop app.
 - Per-model presets: built-in ones for the models tried, and a `models` section
   in the config file. The model's name comes from `--model`, `NIBBLE_MODEL`,
   the `model` setting, or `GET /info` on `nibble serve`.
 
 ## Next
 
-- Use the module from `~/nixfiles`, then register `nibble mcp` with Claude Code
-  and the Claude desktop app.
 - Look at the GPUI window: its layout has only been checked through a trace
   and its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories pointed
   somewhere disposable), never seen.
@@ -47,7 +50,6 @@
   or Look Up, which belong to AppKit's text system and are out of reach.
 - Replies have a Copy button, but their text can't be selected.
 - The app bundle has no icon.
-- A licence. `gui/src/input.rs` is adapted from GPUI's Apache-2.0 example.
 - A skill for Claude is not needed so far: the MCP server's `instructions`
   already say when delegation is worth it.
 
@@ -65,7 +67,7 @@
 - Write and shell tools behind `--write` and `--shell`.
 - Quote-your-evidence mode: the model quotes the lines behind its answer, and
   nibble checks that each quote appears in the file. Flags invented answers.
-- Remove Homebrew oMLX and the Hermes install once the module is in.
+- Point Pi at `nibble serve` (http://127.0.0.1:8765/v1) in place of oMLX.
 
 ## Frontend
 
