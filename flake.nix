@@ -94,6 +94,13 @@
             fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ];
           };
           cargoLock.lockFile = ./Cargo.lock;
+          # `nibble serve` starts nibble-mlx-server by name. Put it at the end
+          # of PATH, so `nix run` works with no dev shell and no config file,
+          # and anything the user has earlier on PATH still wins.
+          nativeBuildInputs = pkgs.lib.optional (appleSilicon pkgs) pkgs.makeWrapper;
+          postFixup = pkgs.lib.optionalString (appleSilicon pkgs) ''
+            wrapProgram $out/bin/nibble --suffix PATH : ${mlxServer pkgs}/bin
+          '';
           meta.mainProgram = "nibble";
         };
         default = nibble;
