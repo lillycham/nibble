@@ -303,6 +303,20 @@ pub fn switch(model: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Read the config file again, and ask the server for its model again, so
+/// the presets follow a model switch. Keeps the old settings if the file has
+/// gone bad.
+pub fn refresh() {
+    match load(None, true) {
+        Ok(config) if config.model_name != get().model_name => {
+            eprintln!("nibble: the model is now {}", config.model_name);
+            set(config);
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("nibble: keeping the old settings: {e}"),
+    }
+}
+
 /// The settings. Tests never call `init`, so they get the defaults.
 pub fn get() -> &'static Config {
     if let Some(config) = *CONFIG.read().unwrap() {

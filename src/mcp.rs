@@ -224,6 +224,8 @@ fn call_tool(params: &Value) -> Value {
     let name = params["name"].as_str().unwrap_or_default();
     let args = &params["arguments"];
     eprintln!("nibble mcp: {name} {args}");
+    // The server may have switched models since the last call.
+    config::refresh();
     let report = match name {
         "delegate" => delegate(args),
         "map" => map(args),
