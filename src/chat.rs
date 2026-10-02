@@ -197,6 +197,7 @@ fn request(
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_recv_response(Some(Duration::from_secs(300)))
+        .http_status_as_error(false)
         .build()
         .into();
     let mut post = agent.post(format!("{url}/v1/chat/completions"));
@@ -206,6 +207,13 @@ fn request(
     let mut response = post
         .send_json(&body)
         .map_err(|e| format!("no answer from the model server at {url}: {e}"))?;
+    if response.status() != 200 {
+        // Pass on what the server said: a bare status code explains nothing,
+        // and the usual cause (a model it can't load) is in the body or its log.
+        let said = response.body_mut().read_to_string().unwrap_or_default();
+        let said: String = said.trim().chars().take(300).collect();
+        return Err(format!("the model server at {url} answered {}: {said}", response.status()).into());
+    }
 
     let mut reply = String::new();
     let mut calls = Vec::new();
@@ -237,6 +245,7 @@ pub fn run(
     events: &mut dyn Events,
 ) -> Result<Outcome, Box<dyn Error>> {
     let max_steps = config::get().max_steps;
+    let mut made = Vec::new();
     let mut step = 0;
     loop {
         let exhausted = step >= max_steps;
@@ -259,7 +268,15 @@ pub fn run(
                 other => other.clone(),
             };
             events.tool(name, &arguments)?;
-            let result = tools::call(name, &arguments);
+            // A model that gets an error often makes the very same call again,
+            // and can spend every round that way. Tell it instead of obeying.
+            let this = (name.to_string(), arguments.clone());
+            let result = if made.contains(&this) {
+                "error: you already made this exact call. Try something different, or answer with what you have.".to_string()
+            } else {
+                made.push(this);
+                tools::call(name, &arguments)
+            };
             messages.push(json!({ "role": "tool", "tool_call_id": call["id"], "content": result }));
         }
         trim(messages);

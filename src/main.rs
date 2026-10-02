@@ -30,6 +30,7 @@ With no prompt and no pipe, nibble starts a chat.
   -s, --system TEXT     replace the system prompt
   -n, --max-tokens N    reply length limit
       --no-tools        don't let the model read files
+      --tools           let it read files even when input is piped in
       --no-claude       don't let the model ask Claude for help
       --anywhere        let the model read files outside the current directory
 
@@ -44,10 +45,12 @@ struct Args {
     tools: Vec<Value>,
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, Box<dyn Error>> {
+fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Option<Args>, Box<dyn Error>> {
     let mut system = None;
     let mut max_tokens = config::get().max_tokens;
-    let (mut tools, mut claude, mut confined) = (config::get().tools, tools::claude_allowed(), true);
+    // Piped input is the whole task, so the model gets no tools with it: an
+    // eager model otherwise goes looking for files, and the schemas cost tokens.
+    let (mut tools, mut claude, mut confined) = (config::get().tools && !piped, tools::claude_allowed(), true);
     let mut words = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -55,6 +58,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, Bo
             "-s" | "--system" => system = Some(args.next().ok_or("-s needs a value")?),
             "-n" | "--max-tokens" => max_tokens = args.next().ok_or("-n needs a value")?.parse()?,
             "--no-tools" => tools = false,
+            "--tools" => tools = true,
             "--no-claude" => claude = false,
             "--anywhere" => confined = false,
             _ => words.push(arg),
@@ -148,12 +152,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         _ => {}
     }
-    let Some(args) = parse_args(argv)? else {
+    let input = piped_input()?;
+    let Some(args) = parse_args(argv, !input.trim().is_empty())? else {
         println!("{USAGE}");
         return Ok(());
     };
 
-    let input = piped_input()?;
     let budget = config::get().input_chars;
     if input.trim().len() > budget {
         eprintln!("nibble: input is {} characters, so the middle is cut to fit {budget}", input.trim().len());

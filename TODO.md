@@ -45,7 +45,6 @@
 
 - Stats line per turn: prompt size, tokens, speed.
 - `-f FILE` to attach files without a tool round.
-- No tool schemas when input is piped.
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
 - Sessions: save and resume chats.
 - Write and shell tools behind `--write` and `--shell`.
@@ -74,16 +73,31 @@ GPUI client for use on the machine itself. Both talk to `POST /chat`.
 
 ## Other models and servers
 
-- Tested: Qwen3-4B-Instruct (tools work) and gemma-3n E4B (no tool-call format;
-  needs `"tools": false`, then works as a plain assistant).
-- Not tested: any larger model, and any server other than mlx_lm.server.
-  Tool calls streamed in pieces (OpenAI, llama.cpp) are handled and unit-tested,
-  but have never met a real server.
-- To do: find out whether a model can call tools without being told, so
-  `tools` need not be set by hand. And try llama.cpp's server through
-  `server_args` with `{model}` and `{port}`.
+Tested on mlx_lm.server 0.32.0:
+
+- Qwen3-4B-Instruct (JSON tool calls). Reluctant: without a firm prompt it
+  refuses any question that names no file. Takes the first search hit as the
+  answer. Does not follow "more lines" paging.
+- LFM2.5-2.6B, Liquid's own MLX conversion (pythonic tool calls). The opposite:
+  eager, up to 15 calls for one question, pages through files, and got right
+  two answers Qwen got wrong. Slow as a result: one question ran past 90 s.
+  It tried to read a file called `<input>` when input was piped, which is why
+  piped input now gets no tools.
+- gemma-3n E4B. No tool-call format; needs `"tools": false`, then works as a
+  plain assistant.
+
+What this means: one built-in prompt can't suit both a reluctant and an eager
+model. The firm default suits the reluctant kind. To do: named prompt presets,
+or a per-model section in the config, and a cap on tool calls per turn (the
+`max_steps` setting counts rounds, and a model can make several calls a round).
+
+Not tested: any model above 4B, and any server other than mlx_lm.server. Tool
+calls streamed in pieces (OpenAI, llama.cpp) are handled and unit-tested, but
+have never met a real server. `tools` must still be set by hand.
+
+Use conversions made with mlx-lm. `mlx-community/LFM2.5-2.6B-4bit` was made
+with mlx-vlm and does not load.
 
 ## Known problems
 
-- The 4B model does not follow "more lines" paging hints in `read_file`.
 - mlx-lm 0.31.3 hangs on gemma-3n unless the request has a seed.

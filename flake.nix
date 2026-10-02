@@ -49,7 +49,18 @@
               # The tests want a GPU, which the sandbox doesn't have. nixpkgs only
               # gets sentencepiece through the test inputs, but mlx-lm needs it at
               # runtime, so add it back as a real dependency.
-              mlx-lm = prev.mlx-lm.overridePythonAttrs (old: {
+              mlx-lm = prev.mlx-lm.overridePythonAttrs (old: rec {
+                # Ahead of nixpkgs (0.31.3), which can't load models converted
+                # with the newer config names, such as LFM2.5. Drop this once
+                # nixpkgs catches up.
+                version = "0.32.0";
+                src = pkgs.fetchFromGitHub {
+                  owner = "ml-explore";
+                  repo = "mlx-lm";
+                  tag = "v${version}";
+                  hash = "sha256-ZkzwImue0UJ+ZRNJVanziqEhdYSO2dS8Y9yQAIIDHK8=";
+                };
+                build-system = old.build-system ++ [ final.setuptools-scm ];
                 doCheck = false;
                 dependencies = old.dependencies ++ [ final.sentencepiece ];
                 # A small model sometimes ends its turn without the closing

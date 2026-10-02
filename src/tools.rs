@@ -72,7 +72,46 @@ pub fn call(name: &str, args: &Value) -> String {
         "ask_claude" => ask_claude(args),
         _ => Err(format!("there is no tool called {name}")),
     };
-    result.unwrap_or_else(|e| format!("error: {e}"))
+    result.unwrap_or_else(|e| {
+        if !e.contains("No such file") {
+            return format!("error: {e}");
+        }
+        // Say what to do next, or the model tries the same path again. If a
+        // file of that name exists somewhere here, name it: the usual mistake
+        // is a right name behind a wrong directory.
+        let mut places = Vec::new();
+        if let Some(name) = args["path"].as_str().and_then(|path| Path::new(path).file_name()) {
+            find_named(Path::new("."), name, &mut places, 0);
+        }
+        if places.is_empty() {
+            format!("error: {e}. Paths are relative to the current directory. Call list_dir to see what is there.")
+        } else {
+            format!("error: {e}. A file of that name is at: {}. Use that path.", places.join(", "))
+        }
+    })
+}
+
+/// Files called `name` under `dir`, as paths relative to the current directory.
+fn find_named(dir: &Path, name: &std::ffi::OsStr, places: &mut Vec<String>, depth: usize) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if places.len() >= 3 {
+            return;
+        }
+        let Ok(kind) = entry.file_type() else { continue };
+        let file_name = entry.file_name();
+        if kind.is_file() && file_name == name {
+            let path = entry.path();
+            places.push(path.strip_prefix(".").unwrap_or(&path).display().to_string());
+        } else if kind.is_dir() && depth < 6 {
+            let hidden = file_name.to_string_lossy().starts_with('.');
+            if !hidden && !SKIP_DIRS.contains(&file_name.to_string_lossy().as_ref()) {
+                find_named(&entry.path(), name, places, depth + 1);
+            }
+        }
+    }
 }
 
 fn text_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -218,12 +257,17 @@ pub fn context() -> String {
     } else {
         "You may only read files inside it."
     };
-    // Only the directory's own name: the model miscopies long absolute paths,
-    // and relative ones cost fewer tokens.
-    let name = dir.file_name().unwrap_or(dir.as_os_str()).to_string_lossy();
+    // No path and no name for the directory itself. Models miscopy a long
+    // absolute path, and given just the name they put it in front of every
+    // path: one wrote nibble/flake.nix, another /nibble/flake.nix.
+    // An example built from what is really here teaches the path form better
+    // than a rule does.
+    let file = names.iter().find(|name| !name.ends_with('/')).map_or("notes.txt", String::as_str);
+    let folder = names.iter().find(|name| name.ends_with('/') && !name.starts_with('.')).map_or("src/", String::as_str);
     format!(
-        "\n\nYou are in the directory \"{name}\". Use relative paths such as src/main.rs. {reach}\n\
-         Its contents: {}{more}",
+        "\n\nThe current directory holds: {}{more}\n\
+         Give paths relative to it, with no leading slash: \"{file}\" for a file listed here, \
+         \"{folder}name\" for one inside a folder. {reach}",
         names.join(" ")
     )
 }
@@ -390,6 +434,11 @@ mod tests {
         let hits = call("search", &json!({ "text": "idle server", "path": "in" }));
         assert!(hits.contains("notes.txt:1:") && !hits.contains("lunch"), "{hits}");
         assert!(call("search", &json!({ "text": "idle server banana" })).starts_with("No line has all"));
+        // A right name behind a wrong directory gets pointed to the real file.
+        fs::create_dir(inside.join("sub")).unwrap();
+        fs::write(inside.join("sub/deep.txt"), "x\n").unwrap();
+        let wrong = call("read_file", &json!({ "path": "nowhere/deep.txt" }));
+        assert!(wrong.starts_with("error:") && wrong.contains("sub/deep.txt"), "{wrong}");
 
         fs::remove_dir_all(&base).unwrap();
     }
