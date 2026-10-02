@@ -27,13 +27,20 @@
   beyond loopback without a token. Chats get the file tools only inside `roots`.
 - GPUI chat window in `gui/` (`nibble-gui`), built by Nix with `runtime_shaders`.
   4.9 MB binary, about 50 MB resident.
+- In the window: a sidebar that lists saved chats (one JSON file each under
+  `~/.local/share/nibble/chats`), and a settings page that edits the shared
+  config file and leaves keys it has no field for alone.
+- Per-model presets: built-in ones for the models tried, and a `models` section
+  in the config file. The model's name comes from `--model`, `NIBBLE_MODEL`,
+  the `model` setting, or `GET /info` on `nibble serve`.
 
 ## Next
 
 - Use the module from `~/nixfiles`, then register `nibble mcp` with Claude Code
   and the Claude desktop app.
-- Look at the GPUI window: its layout has only been checked through a trace,
-  never seen. Then give it an .app bundle, so it has a Dock icon and Spotlight
+- Look at the GPUI window: its layout has only been checked through a trace
+  and its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories pointed
+  somewhere disposable), never seen. Then give it an .app bundle, so it has a Dock icon and Spotlight
   can find it.
 - The GPUI input is one line and does not scroll sideways. It needs to grow
   into a multi-line field. Replies can't be selected or copied yet.
@@ -46,7 +53,12 @@
 - Stats line per turn: prompt size, tokens, speed.
 - `-f FILE` to attach files without a tool round.
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
-- Sessions: save and resume chats.
+- Sessions for the command line: save and resume chats (the window has them).
+- In the window's settings page: a field per model preset, and masking for the token.
+- Settings page: fill each empty field with the value really in use, not a
+  grey hint that repeats a default written into the GUI. The server knows its
+  effective settings (model, roots, limits, presets applied), so it should
+  report them, for example from `/info`, and the page should show those.
 - Write and shell tools behind `--write` and `--shell`.
 - Quote-your-evidence mode: the model quotes the lines behind its answer, and
   nibble checks that each quote appears in the file. Flags invented answers.
@@ -87,9 +99,8 @@ Tested on mlx_lm.server 0.32.0:
   plain assistant.
 
 What this means: one built-in prompt can't suit both a reluctant and an eager
-model. The firm default suits the reluctant kind. To do: named prompt presets,
-or a per-model section in the config, and a cap on tool calls per turn (the
-`max_steps` setting counts rounds, and a model can make several calls a round).
+model, hence the presets. With its preset (light prompt, six calls, shorter
+results) LFM answers a project question in about 50 to 70 seconds.
 
 Not tested: any model above 4B, and any server other than mlx_lm.server. Tool
 calls streamed in pieces (OpenAI, llama.cpp) are handled and unit-tested, but

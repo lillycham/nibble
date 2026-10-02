@@ -85,6 +85,21 @@ impl TextInput {
         }
     }
 
+    pub fn text(&self) -> String {
+        self.content.to_string()
+    }
+
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.reset();
+        self.content = text.to_string().into();
+        self.selected_range = text.len()..text.len();
+        cx.notify();
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: &str) {
+        self.placeholder = placeholder.to_string().into();
+    }
+
     /// Empty the field and return what was in it.
     pub fn take(&mut self, cx: &mut Context<Self>) -> String {
         let text = self.content.to_string();
