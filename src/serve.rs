@@ -24,6 +24,7 @@ after it has been idle. Also serves a chat page at /.
   --backend-port PORT   port for the model server itself
   --idle SECONDS        stop the model server after this long unused
   --server COMMAND      model server program
+                        (any server with an OpenAI-style /v1/chat/completions)
 
 Each option defaults to its setting in the config file; see `nibble config`.
 Arguments after -- go to the model server unchanged.";
@@ -130,10 +131,18 @@ fn acquire(config: &Config, state: &Arc<Mutex<Backend>>) -> io::Result<InUse> {
         }
         eprintln!("nibble serve: starting model server");
         let started = Instant::now();
+        let port = config.backend_port.to_string();
+        let fill = |arg: &String| arg.replace("{model}", &config.model).replace("{port}", &port);
+        // The default command line is mlx_lm.server's. Arguments that name
+        // {model} or {port} replace it, for a server with other flags.
+        let args: Vec<String> = if config.server_args.iter().any(|arg| *arg != fill(arg)) {
+            config.server_args.iter().map(fill).collect()
+        } else {
+            let fixed = ["--model", &config.model, "--host", "127.0.0.1", "--port", &port];
+            fixed.iter().map(|arg| arg.to_string()).chain(config.server_args.iter().cloned()).collect()
+        };
         let mut child = Command::new(&config.server)
-            .args(["--model", &config.model, "--host", "127.0.0.1"])
-            .args(["--port", &config.backend_port.to_string()])
-            .args(&config.server_args)
+            .args(&args)
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("can't run {}: {e}", config.server)))?;
         CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
@@ -244,7 +253,9 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
     if roots.is_empty() {
         roots.extend(std::env::current_dir().ok().filter(|dir| dir.parent().is_some()));
     }
-    if let Some(first) = roots.first() {
+    if !settings.tools {
+        eprintln!("nibble serve: chats have no file tools, because \"tools\" is off");
+    } else if let Some(first) = roots.first() {
         std::env::set_current_dir(first).map_err(|e| format!("{}: {e}", first.display()))?;
         tools::confine(&roots)?;
         let shown: Vec<_> = roots.iter().map(|root| root.display().to_string()).collect();

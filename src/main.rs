@@ -47,7 +47,7 @@ struct Args {
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, Box<dyn Error>> {
     let mut system = None;
     let mut max_tokens = config::get().max_tokens;
-    let (mut tools, mut claude, mut confined) = (true, tools::claude_allowed(), true);
+    let (mut tools, mut claude, mut confined) = (config::get().tools, tools::claude_allowed(), true);
     let mut words = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -64,9 +64,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, Bo
         tools::confine(&[std::env::current_dir()?])?;
     }
     let system = system.unwrap_or_else(|| {
-        let mut system = chat::SYSTEM.to_string();
+        let mut system = chat::system().to_string();
         if tools {
-            system += chat::SYSTEM_TOOLS;
+            system += &chat::system_tools();
         }
         if tools && claude {
             system += chat::SYSTEM_CLAUDE;

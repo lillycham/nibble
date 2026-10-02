@@ -139,13 +139,13 @@ fn chat_turn(client: &mut TcpStream, request: &Request) -> io::Result<()> {
         Ok(body) => body,
         Err(e) => return respond(client, "400 Bad Request", "text/plain", format!("bad JSON: {e}\n").as_bytes()),
     };
-    let use_tools = TOOLS.get().copied().unwrap_or(false);
+    let use_tools = config::get().tools && TOOLS.get().copied().unwrap_or(false);
     // No ask_claude here: a remote chat should not be able to spend Claude
     // usage on this machine.
     let tools = if use_tools { tools::schemas(false) } else { Vec::new() };
-    let mut system = chat::SYSTEM.to_string();
+    let mut system = chat::system().to_string();
     if use_tools {
-        system += chat::SYSTEM_TOOLS;
+        system += &chat::system_tools();
         system += &tools::context();
     }
 

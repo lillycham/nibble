@@ -25,10 +25,10 @@ from the directory nibble was started in.";
 
 // Sent to the client once, at the start. This is where Claude learns when
 // delegation is worth it.
-const INSTRUCTIONS: &str = "nibble runs a small local model (about 4B parameters) at no token cost. \
+const INSTRUCTIONS: &str = "nibble runs a small local model at no token cost. \
 Use it to read files you have not read yourself, when the answer you need is short: summarise, \
-classify, extract, find. Pass file paths, never file contents. It is slow (about 10 seconds per \
-file) and it can be wrong, so use it where a wrong answer is cheap to spot, and check anything \
+classify, extract, find. Pass file paths, never file contents. It is much slower than you \
+(seconds per file) and it can be wrong, so use it where a wrong answer is cheap to spot, and check anything \
 that matters. Do not use it for reasoning, for code changes, or for files you have already read.";
 
 const TOO_HARD: &str = " If you cannot do the task reliably from what you have, reply with \
@@ -135,7 +135,10 @@ fn delegate(args: &Value) -> Result<Report, Report> {
     let paths = paths_arg(args);
 
     if paths.is_empty() {
-        let system = format!("{}{}{TOO_HARD}{}", chat::SYSTEM, chat::SYSTEM_TOOLS, tools::context());
+        if !config.tools {
+            return Err(Report::error("this model has no tools, so it can't look for files itself; pass `paths`"));
+        }
+        let system = format!("{}{}{TOO_HARD}{}", chat::system(), chat::system_tools(), tools::context());
         let mut messages = vec![message("system", &system), message("user", task)];
         let outcome = chat::run(&mut messages, &tools::schemas(false), config.max_tokens, &mut chat::Quiet)
             .map_err(Report::error)?;
@@ -172,7 +175,7 @@ fn delegate(args: &Value) -> Result<Report, Report> {
                       the files one at a time.";
         return Ok(Report { status: "too_large", notes: sizes, answer: answer.to_string() });
     }
-    let system = format!("{}{TOO_HARD}", chat::SYSTEM);
+    let system = format!("{}{TOO_HARD}", chat::system());
     let mut messages = vec![message("system", &system), message("user", &user)];
     let outcome = chat::run(&mut messages, &[], config.max_tokens, &mut chat::Quiet).map_err(Report::error)?;
     Ok(judge(outcome, vec![format!("read: {}", read.join(", "))]))

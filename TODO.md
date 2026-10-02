@@ -10,6 +10,9 @@
 - No web fetch tool: with file reading it would give a small model a way to leak files.
 - Default overhead (system prompt plus tool schemas) stays under 10% of the window.
   Anything that adds to it is opt-in.
+- Not a one-model harness. Nothing in the code may assume Qwen, a 4B model or
+  mlx-lm: what suits one model is a setting with a default (`tools`, `system`,
+  `system_tools`, the size limits, `server_command`, `server_args`).
 
 ## Done
 
@@ -68,6 +71,17 @@ GPUI client for use on the machine itself. Both talk to `POST /chat`.
   - GPUI has no text input widget of its own; ours is adapted from its example.
   - Linux is not packaged: GPUI there needs Wayland and X11 libraries wired in.
 - GUI for the config file, later.
+
+## Other models and servers
+
+- Tested: Qwen3-4B-Instruct (tools work) and gemma-3n E4B (no tool-call format;
+  needs `"tools": false`, then works as a plain assistant).
+- Not tested: any larger model, and any server other than mlx_lm.server.
+  Tool calls streamed in pieces (OpenAI, llama.cpp) are handled and unit-tested,
+  but have never met a real server.
+- To do: find out whether a model can call tools without being told, so
+  `tools` need not be set by hand. And try llama.cpp's server through
+  `server_args` with `{model}` and `{port}`.
 
 ## Known problems
 

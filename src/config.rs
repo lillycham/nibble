@@ -25,6 +25,14 @@ pub struct Config {
     pub map_file_chars: usize,
     pub map_max_tokens: u32,
     pub claude_command: String,
+    /// Whether to offer the model tools at all. Turn it off for a model with
+    /// no tool-call format: told to use tools it can't call, it writes
+    /// make-believe calls as its answer.
+    pub tools: bool,
+    /// Replacements for the built-in system prompts. Empty means built-in.
+    /// The built-in ones are firm, to suit small models.
+    pub system: String,
+    pub system_tools: String,
     /// Directories `nibble mcp` may read inside. Empty means its working directory.
     pub roots: Vec<String>,
     // `nibble serve`
@@ -33,6 +41,9 @@ pub struct Config {
     pub backend_port: u16,
     pub idle_seconds: u64,
     pub server_command: String,
+    /// Extra arguments for the model server. If any of them holds {model} or
+    /// {port}, they are the whole command line instead, with those filled
+    /// in, for servers that don't take mlx_lm.server's flags.
     pub server_args: Vec<String>,
     /// When set, every request to `nibble serve` must carry it as a Bearer
     /// token, the same way an OpenAI-style API key is sent.
@@ -53,6 +64,9 @@ impl Default for Config {
             map_file_chars: 8_000,
             map_max_tokens: 100,
             claude_command: "claude".into(),
+            tools: true,
+            system: String::new(),
+            system_tools: String::new(),
             roots: Vec::new(),
             model: String::new(),
             listen: "127.0.0.1:8765".into(),
@@ -90,6 +104,9 @@ impl Config {
             "map_file_chars" => number(value).map(|v| self.map_file_chars = v),
             "map_max_tokens" => number(value).map(|v| self.map_max_tokens = v),
             "claude_command" => text(value).map(|v| self.claude_command = v),
+            "tools" => value.as_bool().map(|v| self.tools = v),
+            "system" => text(value).map(|v| self.system = v),
+            "system_tools" => text(value).map(|v| self.system_tools = v),
             "roots" => list(value).map(|v| self.roots = v),
             "model" => text(value).map(|v| self.model = v),
             "listen" => text(value).map(|v| self.listen = v),
@@ -116,6 +133,9 @@ impl Config {
             "map_file_chars": self.map_file_chars,
             "map_max_tokens": self.map_max_tokens,
             "claude_command": self.claude_command,
+            "tools": self.tools,
+            "system": self.system,
+            "system_tools": self.system_tools,
             "roots": self.roots,
             "model": self.model,
             "listen": self.listen,

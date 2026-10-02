@@ -10,12 +10,13 @@ use serde_json::{json, Value};
 
 use crate::{config, tools};
 
-pub const SYSTEM: &str = "You are nibble, a small local assistant. Answer directly and briefly. \
+const SYSTEM: &str = "You are nibble, a small local assistant. Answer directly and briefly. \
 Output only what was asked for, with no preamble and no closing remarks.";
 
-// Worded firmly, because a 4B model otherwise guesses at file contents, claims
-// it has no access to files, or refuses a question that names no file.
-pub const SYSTEM_TOOLS: &str = " You have tools that read and search files on this machine. Assume a \
+// Worded firmly, because a small model otherwise guesses at file contents,
+// claims it has no access to files, or refuses a question that names no file.
+// A larger model may want something lighter: both prompts are settings.
+const SYSTEM_TOOLS: &str = " You have tools that read and search files on this machine. Assume a \
 question is about the files in this directory unless it is plainly general knowledge. For such a \
 question your first step is always a tool call: search for a key word from the question, or \
 list_dir. Never say that you lack information before you have searched, and never ask the user \
@@ -23,6 +24,43 @@ which file to look at. When the input already holds everything you need, answer 
 
 pub const SYSTEM_CLAUDE: &str = " If the task is too hard for you, call ask_claude with a complete \
 question, then pass on its answer.";
+
+/// The base system prompt: the "system" setting, or the built-in one.
+pub fn system() -> &'static str {
+    let custom = &config::get().system;
+    if custom.is_empty() { SYSTEM } else { custom }
+}
+
+/// What is added when the model has file tools: the "system_tools" setting,
+/// or the built-in text.
+pub fn system_tools() -> String {
+    let custom = &config::get().system_tools;
+    if custom.is_empty() { SYSTEM_TOOLS.to_string() } else { format!(" {custom}") }
+}
+
+/// Add the tool calls in one streamed chunk to those collected so far.
+/// Servers send them in two ways: whole (mlx-lm), or in pieces that share an
+/// index (OpenAI, llama.cpp), where the arguments arrive a few characters at
+/// a time.
+fn merge_calls(calls: &mut Vec<Value>, pieces: &mut Vec<Value>) {
+    for piece in pieces.drain(..) {
+        let index = piece["index"].as_u64();
+        let Some(call) = calls.iter_mut().find(|call| index.is_some() && call["index"].as_u64() == index) else {
+            calls.push(piece);
+            continue;
+        };
+        if let Some(more) = piece["function"]["arguments"].as_str() {
+            let so_far = call["function"]["arguments"].as_str().unwrap_or_default();
+            call["function"]["arguments"] = format!("{so_far}{more}").into();
+        }
+        for (owner, key) in [("function", "name"), ("", "id")] {
+            let (from, to) = if owner.is_empty() { (&piece, &mut *call) } else { (&piece[owner], &mut call[owner]) };
+            if from[key].as_str().is_some_and(|v| !v.is_empty()) && !to[key].is_string() {
+                to[key] = from[key].clone();
+            }
+        }
+    }
+}
 
 const DROPPED: &str = "[earlier result dropped to save space]";
 
@@ -146,7 +184,8 @@ fn request(
         "max_tokens": max_tokens,
         "stream": true,
         // mlx-lm batches any request that has no seed, and its batch cache breaks
-        // some models (gemma-3n hangs the server). A seed keeps us on the plain path.
+        // some models (gemma-3n hangs the server). A seed keeps us on the plain
+        // path. Other servers take it as the usual sampling seed.
         "seed": 0,
     });
     if !tools.is_empty() {
@@ -182,9 +221,8 @@ fn request(
             events.text(text)?;
             reply.push_str(text);
         }
-        // mlx-lm sends each tool call whole, in a single chunk.
-        if let Some(new) = delta["tool_calls"].as_array_mut() {
-            calls.append(new);
+        if let Some(pieces) = delta["tool_calls"].as_array_mut() {
+            merge_calls(&mut calls, pieces);
         }
     }
     events.reply_end()?;
@@ -226,5 +264,33 @@ pub fn run(
         }
         trim(messages);
         step += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_calls_arrive_whole_or_in_pieces() {
+        // mlx-lm: each call complete, each with its own index.
+        let mut calls = Vec::new();
+        merge_calls(&mut calls, &mut vec![json!({ "index": 0, "id": "a", "function": { "name": "list_dir", "arguments": "{}" } })]);
+        merge_calls(&mut calls, &mut vec![json!({ "index": 1, "id": "b", "function": { "name": "search", "arguments": "{\"text\":\"x\"}" } })]);
+        assert_eq!(calls.len(), 2);
+
+        // OpenAI style: a name first, then the arguments in fragments.
+        let mut calls = Vec::new();
+        for piece in [
+            json!({ "index": 0, "id": "c", "type": "function", "function": { "name": "read_file", "arguments": "" } }),
+            json!({ "index": 0, "function": { "arguments": "{\"path\":" } }),
+            json!({ "index": 0, "function": { "arguments": "\"a.txt\"}" } }),
+        ] {
+            merge_calls(&mut calls, &mut vec![piece]);
+        }
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "read_file");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"path\":\"a.txt\"}");
+        assert_eq!(calls[0]["id"], "c");
     }
 }
