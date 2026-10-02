@@ -76,14 +76,31 @@
         nibble = pkgs.rustPlatform.buildRustPackage {
           pname = "nibble";
           version = "0.1.0";
-          src = ./.;
+          # Only what the build reads, so a change to the GUI or the notes
+          # doesn't rebuild the CLI.
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ];
+          };
           cargoLock.lockFile = ./Cargo.lock;
           meta.mainProgram = "nibble";
         };
         default = nibble;
       } // pkgs.lib.optionalAttrs (appleSilicon pkgs) {
         mlx-server = mlxServer pkgs;
+      } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+        # The native chat window. macOS only for now: GPUI on Linux needs the
+        # Wayland and X11 libraries wired in, which nobody has tried here.
+        nibble-gui = pkgs.rustPlatform.buildRustPackage {
+          pname = "nibble-gui";
+          version = "0.1.0";
+          src = ./gui;
+          cargoLock.lockFile = ./gui/Cargo.lock;
+          meta.mainProgram = "nibble-gui";
+        };
       });
+
+      homeModules.default = import ./nix/module.nix self;
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
