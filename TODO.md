@@ -43,46 +43,93 @@
   It refuses while a reply is in progress. The window and the page have a list.
   The switch is not kept: a restart goes back to `model`.
 
-## Next
+## Roadmap
 
-- Look at the GPUI window: its layout has only been checked through a trace
-  and its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories pointed
-  somewhere disposable), never seen.
-- The GPUI input is one line and does not scroll sideways. It needs to grow
-  into a multi-line field. It has the macOS editing keys (by word, to either
-  end, the Control keys, undo, double-click), but not spell-check, autocorrect
-  or Look Up, which belong to AppKit's text system and are out of reach.
-- Replies have a Copy button, but their text can't be selected.
-- The app bundle has no icon.
-- A skill for Claude is not needed so far: the MCP server's `instructions`
-  already say when delegation is worth it.
+In this order. Each phase is useful on its own.
 
-## Later
+### 1. Close the gaps
 
-- `nibble mcp` reads the model's presets once, when it starts. After a model
-  switch it keeps the old model's presets until Claude restarts it.
-- A remote client with the token can still name any model in a `/v1/` request
-  body, and mlx_lm.server loads it, even from Hugging Face. Pin the model in
-  requests that `serve` passes on.
-
-- Stats line per turn: prompt size, tokens, speed.
-- `-f FILE` to attach files without a tool round.
-- Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
-- Sessions for the command line: save and resume chats (the window has them).
-- In the window's settings page: a field per model preset, and masking for the token.
+- Pin the model in requests that `serve` passes on. Today a client with the
+  token can name any model in a `/v1/` request body, and mlx_lm.server loads
+  it, even from Hugging Face.
+- `nibble mcp` reads the model's presets once, when it starts, so after a model
+  switch it keeps the old ones. Ask `/info` on each call instead.
 - Settings page: fill each empty field with the value really in use, not a
   grey hint that repeats a default written into the GUI. The server knows its
   effective settings (model, roots, limits, presets applied), so it should
   report them, for example from `/info`, and the page should show those.
-- Write and shell tools behind `--write` and `--shell`.
+
+### 2. Model tests
+
+The presets so far rest on a few questions asked by hand. Measure instead.
+
+- `nibble eval`: a small fixture project in the repo, about 20 questions with
+  known answers. Reports correct answers, tool calls and time per model, so a
+  new model or preset gets a fair trial in one command.
 - Quote-your-evidence mode: the model quotes the lines behind its answer, and
   nibble checks that each quote appears in the file. Flags invented answers.
+  The eval measures whether it helps.
+
+### 3. The window as the main interface
+
+The desktop window is the primary interface for now. The web page stays as
+it is: no new work on it until phase 6.
+
+- Look at the window: its layout has only been checked through a trace and
+  its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories pointed
+  somewhere disposable), never seen.
+- The input is one line and does not scroll sideways. It needs to grow into a
+  multi-line field. It has the macOS editing keys (by word, to either end, the
+  Control keys, undo, double-click), but not spell-check, autocorrect or Look
+  Up, which belong to AppKit's text system and are out of reach.
+- Replies have a Copy button, but their text can't be selected.
+- An app icon.
+- Model state in the header: idle, loading or loaded. A cold start is the
+  slow part, and today it looks like a hang.
+- Stats line per turn: prompt size, tokens, speed.
+- Attach files by dragging them in, and `-f FILE` on the command line, without
+  a tool round.
+- Settings page: a field per model preset, and masking for the token.
+
+### 4. Release 0.1
+
+- CI: `cargo test` for both crates and `nix build` on each push.
+- A version tag and a changelog. Each release bumps the NUR pin.
+- Try one server other than mlx_lm.server (llama.cpp) once, so "not mlx-lm
+  only" is shown, not claimed. It is also the way to Linux.
+
+### 5. Slash commands, then plugins
+
+- Slash commands in the window and the chat REPL: built-ins first (`/new`,
+  `/model`, `/clear`, `/settings`), then recipes, which are named prompts with
+  settings (`/summarise`, `/commit`), declared in the config file or the Nix
+  module. On the command line the same recipes are `nibble commit` and so on.
+- Plugins, later. Open questions: the form (external programs that speak a
+  small JSON protocol, or nibble as an MCP client, which would reuse existing
+  MCP servers as plugins), and the context budget: each tool schema costs
+  tokens on every request, so plugins must be opt-in per recipe or per chat,
+  never on by default.
+
+### 6. Reach
+
+- Tailscale, and the web page as a phone app (manifest, icon, mobile layout).
+  See Frontend below.
+
+### Not planned yet
+
+- Write and shell tools behind `--write` and `--shell`.
+- Sessions for the command line: save and resume chats (the window has them).
+- A newer GPUI. It also clears the `grid` alert (dismissed: GPUI 0.2.2 pins
+  taffy 0.9.0, which needs grid 0.18).
 - Point Pi at `nibble serve` (http://127.0.0.1:8765/v1) in place of oMLX.
+- A skill for Claude is not needed so far: the MCP server's `instructions`
+  already say when delegation is worth it.
 
 ## Frontend
 
 Decided: a web page for remote use (done, served by `nibble serve`), and a
-GPUI client for use on the machine itself. Both talk to `POST /chat`.
+GPUI client for use on the machine itself. Both talk to `POST /chat`. The
+window is the primary interface; the web page waits for phase 6.
 
 - Tailscale: listen on the tailnet address with a token set. Do not rely on
   "requests from 127.0.0.1 are local": `tailscale serve` makes remote requests
