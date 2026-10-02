@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nibble</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #faf8f5; --fg: #2b2622; --dim: #8a8078; --line: #e6e0d8;
+    --user: #efe9e0; --code: #f1ece4; --accent: #b4572e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1a18; --fg: #e9e3da; --dim: #8f867c; --line: #35302b;
+      --user: #2a2622; --code: #26221f; --accent: #e08a5b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.5 system-ui, sans-serif;
+  }
+  header, main, form { width: 100%; max-width: 46rem; margin: 0 auto; padding: 0 16px; }
+  header { display: flex; align-items: baseline; gap: 12px; padding-top: 14px; padding-bottom: 10px; }
+  header h1 { font-size: 1.05rem; margin: 0; letter-spacing: 0.02em; }
+  header span { color: var(--dim); font-size: 0.85rem; flex: 1; }
+  button {
+    font: inherit; color: var(--fg); background: none;
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--dim); }
+  main { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+  .turn { margin: 14px 0; overflow-wrap: anywhere; }
+  .user { background: var(--user); border-radius: 12px; padding: 9px 13px; white-space: pre-wrap; }
+  .reply p { margin: 0 0 0.7em; white-space: pre-wrap; }
+  .tool, .note { color: var(--dim); font-size: 0.85rem; margin: 4px 0; }
+  .tool::before { content: "· "; }
+  .error { color: var(--accent); }
+  code { font: 0.88em ui-monospace, monospace; background: var(--code); border-radius: 4px; padding: 1px 4px; }
+  pre { background: var(--code); border-radius: 8px; padding: 10px 12px; overflow-x: auto; margin: 0 0 0.7em; }
+  pre code { background: none; padding: 0; }
+  form { display: flex; gap: 8px; padding-top: 10px; padding-bottom: 16px; border-top: 1px solid var(--line); }
+  form[hidden] { display: none; }
+  #auth { border-top: none; padding-top: 0; padding-bottom: 10px; }
+  textarea, input {
+    flex: 1; resize: none; font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; min-height: 44px; max-height: 40vh;
+  }
+  textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  form button { align-self: flex-end; min-height: 44px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>nibble</h1>
+  <span>a small local model</span>
+  <button id="new" type="button">New chat</button>
+</header>
+<form id="auth" hidden>
+  <input id="token" type="password" placeholder="Access token" autocomplete="off" aria-label="Access token">
+  <button>Save</button>
+</form>
+<main id="log" aria-live="polite"></main>
+<form id="form">
+  <textarea id="input" rows="1" placeholder="Ask something small" autofocus></textarea>
+  <button id="send">Send</button>
+</form>
+<script>
+const log = document.getElementById('log');
+const form = document.getElementById('form');
+const input = document.getElementById('input');
+const send = document.getElementById('send');
+
+// The access token is typed in once and kept in this browser's storage. It
+// never goes in the address, where histories and proxy logs would keep it.
+const auth = document.getElementById('auth');
+const tokenInput = document.getElementById('token');
+let token = '';
+try { token = localStorage.getItem('nibble-token') || ''; } catch (e) {}
+
+auth.addEventListener('submit', e => {
+  e.preventDefault();
+  token = tokenInput.value.trim();
+  try { localStorage.setItem('nibble-token', token); } catch (e) {}
+  tokenInput.value = '';
+  auth.hidden = true;
+  input.focus();
+});
+
+let messages = [];
+let running = null;
+
+function add(kind, text) {
+  const el = document.createElement('div');
+  el.className = kind;
+  el.textContent = text || '';
+  log.append(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+const escape = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// Just enough Markdown for a chat: fenced code, inline code, bold.
+function render(text) {
+  return text.split(/```/).map((part, i) => {
+    if (i % 2) return '<pre><code>' + escape(part.replace(/^[^\n]*\n/, '')) + '</code></pre>';
+    return part.split(/\n{2,}/).filter(p => p.trim()).map(p =>
+      '<p>' + escape(p.trim())
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>') + '</p>').join('');
+  }).join('');
+}
+
+async function ask(text) {
+  messages.push({ role: 'user', content: text });
+  add('turn user', text);
+  const turn = add('turn');
+  let reply = null, answer = '';
+  running = new AbortController();
+  send.textContent = 'Stop';
+  try {
+    const response = await fetch('chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token && { Authorization: 'Bearer ' + token }) },
+      body: JSON.stringify({ messages }),
+      signal: running.signal,
+    });
+    if (response.status === 401) {
+      auth.hidden = false;
+      tokenInput.focus();
+      throw new Error('This server needs its access token. Enter it above, then send again.');
+    }
+    if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const events = pending.split('\n\n');
+      pending = events.pop();
+      for (const event of events) {
+        if (!event.startsWith('data: ')) continue;
+        const data = JSON.parse(event.slice(6));
+        if (data.text) {
+          if (!reply) { reply = document.createElement('div'); reply.className = 'reply'; turn.append(reply); answer = ''; }
+          answer += data.text;
+          reply.innerHTML = render(answer);
+        } else if (data.tool) {
+          const tool = document.createElement('div');
+          tool.className = 'tool';
+          tool.textContent = data.tool;
+          turn.append(tool);
+          reply = null;
+        } else if (data.error) {
+          throw new Error(data.error);
+        }
+        log.scrollTop = log.scrollHeight;
+      }
+    }
+    messages.push({ role: 'assistant', content: answer });
+  } catch (e) {
+    const note = document.createElement('div');
+    note.className = 'note error';
+    note.textContent = e.name === 'AbortError' ? 'Stopped.' : e.message;
+    turn.append(note);
+    // Keep the history consistent: a turn with no answer is not sent again.
+    if (answer) messages.push({ role: 'assistant', content: answer }); else messages.pop();
+  }
+  running = null;
+  send.textContent = 'Send';
+  if (auth.hidden) input.focus();
+}
+
+form.addEventListener('submit', e => {
+  e.preventDefault();
+  if (running) { running.abort(); return; }
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  input.style.height = '';
+  ask(text);
+});
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
+});
+
+input.addEventListener('input', () => {
+  input.style.height = '';
+  input.style.height = input.scrollHeight + 2 + 'px';
+});
+
+document.getElementById('new').addEventListener('click', () => {
+  if (running) running.abort();
+  messages = [];
+  log.replaceChildren();
+  input.focus();
+});
+</script>
+</body>
+</html>

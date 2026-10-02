@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
-// One result may use about a quarter of an 8k window.
-const RESULT_BUDGET: usize = 6_000;
+use crate::config;
+
 const MAX_MATCHES: usize = 40;
 const MAX_ENTRIES: usize = 200;
 const MAX_SEARCH_FILE: u64 = 1 << 20;
@@ -82,34 +82,45 @@ fn text_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     }
 }
 
-/// The directory the file tools may read inside, or None for anywhere.
-static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// The directories the file tools may read inside. Empty means anywhere.
+static ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
-/// Keep the file tools inside the current directory. Without this call they
-/// can read anything the user can.
-pub fn confine() -> Result<(), String> {
-    let root = std::env::current_dir().and_then(fs::canonicalize).map_err(|e| format!("current directory: {e}"))?;
-    ROOT.set(Some(root)).map_err(|_| "already confined".to_string())
+/// Keep the file tools inside these directories. Without this call they can
+/// read anything the user can.
+pub fn confine(dirs: &[PathBuf]) -> Result<(), String> {
+    let roots: Result<Vec<_>, _> =
+        dirs.iter().map(|dir| fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))).collect();
+    ROOTS.set(roots?).map_err(|_| "already confined".to_string())
 }
 
-fn root() -> Option<&'static PathBuf> {
-    ROOT.get().and_then(Option::as_ref)
+fn roots() -> &'static [PathBuf] {
+    ROOTS.get().map_or(&[], Vec::as_slice)
 }
 
-fn path_arg(args: &Value) -> Result<PathBuf, String> {
-    let path = args["path"].as_str().filter(|p| !p.is_empty()).unwrap_or(".");
-    let path = match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+/// Give a leading ~/ its usual meaning.
+pub fn expand(path: &str) -> PathBuf {
+    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => Path::new(&home).join(rest),
         _ => PathBuf::from(path),
-    };
-    if let Some(root) = root() {
+    }
+}
+
+/// Turn a path from the model or from Claude into one we may read.
+pub fn resolve(path: &str) -> Result<PathBuf, String> {
+    let path = expand(path);
+    if !roots().is_empty() {
         // Canonical form, so neither .. nor a symlink can lead outside.
         let real = fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if !real.starts_with(root) {
-            return Err(format!("{} is outside {}, and you may only read inside it", path.display(), root.display()));
+        if !roots().iter().any(|root| real.starts_with(root)) {
+            let allowed: Vec<_> = roots().iter().map(|root| root.display().to_string()).collect();
+            return Err(format!("{} is outside {}, and you may only read inside it", path.display(), allowed.join(", ")));
         }
     }
     Ok(path)
+}
+
+fn path_arg(args: &Value) -> Result<PathBuf, String> {
+    resolve(args["path"].as_str().filter(|p| !p.is_empty()).unwrap_or("."))
 }
 
 /// Small models sometimes send numbers as strings.
@@ -118,7 +129,7 @@ fn number_arg(args: &Value, key: &str) -> Option<usize> {
     value.as_u64().map(|n| n as usize).or_else(|| value.as_str()?.trim().parse().ok())
 }
 
-fn clip(line: &str, max: usize) -> &str {
+pub fn clip(line: &str, max: usize) -> &str {
     let mut end = line.len().min(max);
     while !line.is_char_boundary(end) {
         end -= 1;
@@ -126,7 +137,7 @@ fn clip(line: &str, max: usize) -> &str {
     &line[..end]
 }
 
-fn read_text(path: &Path) -> Result<String, String> {
+pub fn read_text(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.iter().take(8000).any(|&b| b == 0) {
         return Err(format!("{} is a binary file", path.display()));
@@ -147,8 +158,8 @@ fn read_file(args: &Value) -> Result<String, String> {
     let mut body = String::new();
     let mut end = start - 1;
     for line in text.lines().skip(start - 1) {
-        let line = clip(line, RESULT_BUDGET);
-        if !body.is_empty() && body.len() + line.len() >= RESULT_BUDGET {
+        let line = clip(line, config::get().result_chars);
+        if !body.is_empty() && body.len() + line.len() >= config::get().result_chars {
             break;
         }
         body.push_str(line);
@@ -193,9 +204,10 @@ pub fn context() -> String {
     let mut names = entries(&dir).unwrap_or_default();
     let more = if names.len() > 40 { " ..." } else { "" };
     names.truncate(40);
-    let reach = match root() {
-        Some(_) => "You may only read files inside it.",
-        None => "Files outside it are also yours to read: give the full path, such as /etc/hosts.",
+    let reach = if roots().is_empty() {
+        "Files outside it are also yours to read: give the full path, such as /etc/hosts."
+    } else {
+        "You may only read files inside it."
     };
     // Only the directory's own name: the model miscopies long absolute paths,
     // and relative ones cost fewer tokens.
@@ -284,9 +296,9 @@ pub fn claude_allowed() -> bool {
 
 fn ask_claude(args: &Value) -> Result<String, String> {
     let question = text_arg(args, "question")?;
-    let program = std::env::var("NIBBLE_CLAUDE").unwrap_or_else(|_| "claude".to_string());
+    let program = &config::get().claude_command;
     // Claude gets read-only tools too, so it can look at the files the question names.
-    let output = Command::new(&program)
+    let output = Command::new(program)
         .args(["-p", question, "--tools", "Read,Grep,Glob", "--no-session-persistence"])
         .env("NIBBLE_DEPTH", "1")
         .output()
@@ -296,7 +308,7 @@ fn ask_claude(args: &Value) -> Result<String, String> {
         return Err(format!("{program} failed: {}", clip(stderr.trim(), 500)));
     }
     let answer = String::from_utf8_lossy(&output.stdout);
-    Ok(clip(answer.trim(), RESULT_BUDGET).to_string() + "\n")
+    Ok(clip(answer.trim(), config::get().result_chars).to_string() + "\n")
 }
 
 #[cfg(test)]
@@ -315,7 +327,7 @@ mod tests {
         fs::write(outside.join("secret.txt"), "hidden words\n").unwrap();
         std::os::unix::fs::symlink(outside.join("secret.txt"), inside.join("link.txt")).unwrap();
         std::env::set_current_dir(&inside).unwrap();
-        confine().unwrap();
+        confine(std::slice::from_ref(&inside)).unwrap();
 
         let read = |path: &str| call("read_file", &json!({ "path": path }));
         assert!(read("ok.txt").contains("fine"));
