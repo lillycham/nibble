@@ -42,22 +42,14 @@
   `POST /model` changes to one of them (never to a path the client names).
   It refuses while a reply is in progress. The window and the page have a list.
   The switch is not kept: a restart goes back to `model`.
+- `serve` pins the model in each `/v1/` request, so a client can't make the
+  server load another one. `nibble mcp` asks `/info` on each call, so it
+  follows a model switch. `GET /settings` (token needed) reports the settings
+  in use, and the settings page shows them in empty fields.
 
 ## Roadmap
 
-In this order. Each phase is useful on its own.
-
-### 1. Close the gaps
-
-- Pin the model in requests that `serve` passes on. Today a client with the
-  token can name any model in a `/v1/` request body, and mlx_lm.server loads
-  it, even from Hugging Face.
-- `nibble mcp` reads the model's presets once, when it starts, so after a model
-  switch it keeps the old ones. Ask `/info` on each call instead.
-- Settings page: fill each empty field with the value really in use, not a
-  grey hint that repeats a default written into the GUI. The server knows its
-  effective settings (model, roots, limits, presets applied), so it should
-  report them, for example from `/info`, and the page should show those.
+In this order. Each phase is useful on its own. Phase 1 (close the gaps) is done.
 
 ### 2. Model tests
 
