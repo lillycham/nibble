@@ -125,6 +125,13 @@ and `-f FILE`.
   slow part, and today it looks like a hang.
 - Stats line per turn in the window, as the command line has.
 - Settings page: a field per model preset, and masking for the token.
+- Images for vision models. `nibble serve` can tell one from its folder
+  (`vision_config` in `config.json`, or a `preprocessor_config.json`) and
+  say `"vision": true` in `/info`; the window then takes dropped images for
+  that model only. mlx_lm.server is text-only, so sending them needs a
+  server that takes images (mlx-vlm's), behind `nibble serve` like the other.
+  Detection can come first. LFM2.5-2.6B is text-only; Liquid's vision
+  models are LFM2-VL.
 
 ### 4. Release 0.1
 
