@@ -7,8 +7,9 @@
 use serde_json::{Map, Value};
 
 /// The built-in commands: name, what follows it, and what it does.
-pub const BUILT_IN: [(&str, &str, &str); 6] = [
+pub const BUILT_IN: [(&str, &str, &str); 7] = [
     ("new", "", "Start a new chat"),
+    ("cd", "folder", "Choose the folder this chat works in"),
     ("clear", "", "Clear this chat and forget it"),
     ("model", "name", "Switch to another model"),
     ("settings", "", "Open the settings"),
@@ -132,7 +133,7 @@ mod tests {
     #[test]
     fn commands_are_offered_as_they_are_typed() {
         let names = |items: Vec<Item>| items.into_iter().map(|item| item.name).collect::<Vec<_>>();
-        assert_eq!(names(offer("/", &in_use()).unwrap()).len(), 8);
+        assert_eq!(names(offer("/", &in_use()).unwrap()).len(), 9);
         assert_eq!(names(offer("/s", &in_use()).unwrap()), ["settings", "summarise"]);
         assert_eq!(names(offer("/co", &in_use()).unwrap()), ["commit"]);
         assert!(offer("/sum some text", &in_use()).is_none());
@@ -145,6 +146,7 @@ mod tests {
         assert_eq!(resolve("nope", &in_use()), None);
 
         assert_eq!(split("/model lfm"), Some(("model", "lfm")));
+        assert_eq!(split("/cd ~/devel/nibble"), Some(("cd", "~/devel/nibble")));
         assert_eq!(split("/usr/bin is where"), None);
 
         let recipes = recipes(&in_use());

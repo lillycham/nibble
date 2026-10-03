@@ -33,7 +33,9 @@ nibble commit     # a recipe: a commit message for the staged changes
   that is too hard for it to `claude -p`.
 - **Plugins**: MCP servers whose tools a chat can ask for with `--plugin`.
 - **`nibble-gui`**: a native chat window, built with GPUI. Drop files on it to
-  attach them to your next message, as `nibble -f` does.
+  attach them to your next message, as `nibble -f` does. Each chat can have
+  its own folder inside `roots`: drop a folder on the window, click the folder
+  by Send, or type `/cd PATH`. The model then reads only in that folder.
 - **Slash commands**, in the chat and the window: `/new`, `/clear`, `/model`,
   `/settings`, `/quote`, `/help`, and a command for each recipe.
 

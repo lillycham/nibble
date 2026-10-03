@@ -9,9 +9,9 @@ use serde_json::{json, Map, Value};
 
 /// Names a recipe may not take: the built-in slash commands, and the
 /// command line's own subcommands, which `nibble NAME` would shadow.
-pub const RESERVED: [&str; 14] = [
-    "help", "new", "clear", "model", "settings", "quote", "plugin", "serve", "mcp", "eval", "config", "chats", "recipes",
-    "plugins",
+pub const RESERVED: [&str; 15] = [
+    "help", "new", "clear", "model", "settings", "quote", "plugin", "cd", "serve", "mcp", "eval", "config", "chats",
+    "recipes", "plugins",
 ];
 
 #[derive(Clone, Debug, PartialEq)]
