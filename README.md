@@ -30,7 +30,8 @@ nibble -c         # go on with the last chat
   many files, each in a fresh context. `delegate` takes `quote` too.
 - **`ask_claude`**: the other direction. The local model can pass a question
   that is too hard for it to `claude -p`.
-- **`nibble-gui`**: a native chat window, built with GPUI.
+- **`nibble-gui`**: a native chat window, built with GPUI. Drop files on it to
+  attach them to your next message, as `nibble -f` does.
 
 ## Run it
 

@@ -109,6 +109,12 @@
   `done` event, with `input_chars`, so the status bar also shows how full
   the conversation is ("41% of context", ochre from 85%, past which the
   oldest messages are left out). Stats are not saved with the chat.
+- Files dropped on the window go whole with the next message, as `-f FILE`
+  does: each shows as a chip that can be taken off, and a folder, a binary
+  file or one over `input_chars` is refused with a line saying why. A chat
+  with files sends `"tools": false`, which `POST /chat` now honours, so it
+  gets no file tools, again as with `-f`. Sent messages show the files by
+  name, and chats saved by `nibble -f` show the same way.
 
 ## Roadmap
 
@@ -139,8 +145,13 @@ and `-f FILE`.
 - A selection in a reply stays inside one block (a run of text or a code
   block). Selecting across blocks would need one text element for the whole
   reply; until then, Copy takes all of it.
-- Attach files by dragging them into the window, as `-f FILE` does on the
-  command line.
+- Images for vision models. `nibble serve` can tell one from its folder
+  (`vision_config` in `config.json`, or a `preprocessor_config.json`) and
+  say `"vision": true` in `/info`; the window then takes dropped images for
+  that model only. mlx_lm.server is text-only, so sending them needs a
+  server that takes images (mlx-vlm's), behind `nibble serve` like the other.
+  Detection can come first. LFM2.5-2.6B is text-only; Liquid's vision
+  models are LFM2-VL.
 
 ### 4. Release 0.1
 
