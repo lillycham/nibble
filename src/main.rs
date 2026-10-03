@@ -2,6 +2,7 @@ mod chat;
 mod config;
 mod mcp;
 mod serve;
+mod sessions;
 mod tools;
 mod web;
 
@@ -18,14 +19,16 @@ use std::time::Duration;
 use serde_json::Value;
 
 use chat::message;
+use sessions::{Recorder, Session};
 
 const USAGE: &str = "usage: nibble [options] [PROMPT...]
        nibble serve --model PATH [options]
        nibble mcp [--root DIR]...
        nibble config
+       nibble chats
 
 Text piped on stdin is given to the model as input for the prompt.
-With no prompt and no pipe, nibble starts a chat.
+With no prompt and no pipe, nibble starts a chat, which is saved as it goes.
 
   -f, --file FILE       attach a file to the prompt (or the chat's first
                         message); repeat for more. Its whole text is sent, so
@@ -39,6 +42,12 @@ With no prompt and no pipe, nibble starts a chat.
       --anywhere        let the model read files outside the current directory
       --stats           after each answer, show its prompt size, tokens and speed
       --no-stats        don't (the default when stderr is not a terminal)
+  -c, --continue        go on with the newest saved chat
+  -r, --resume ID       go on with a saved chat; `nibble chats` lists them
+      --no-save         don't save this chat
+
+Saved chats are shared with the window. A one-shot prompt is saved only when
+it continues a chat.
 
 The model can read and search files but can't change anything.
 
@@ -52,6 +61,13 @@ struct Args {
     files: String,
     tools: Vec<Value>,
     stats: bool,
+    resume: Option<Resume>,
+    save: bool,
+}
+
+enum Resume {
+    Latest,
+    Id(String),
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Option<Args>, Box<dyn Error>> {
@@ -59,6 +75,7 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
     let mut max_tokens = config::get().max_tokens;
     let (mut tools, mut claude, mut confined) = (None, tools::claude_allowed(), true);
     let mut stats = io::stderr().is_terminal();
+    let (mut resume, mut save) = (None, true);
     let mut words = Vec::new();
     let mut files = String::new();
     while let Some(arg) = args.next() {
@@ -78,6 +95,9 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
             "--anywhere" => confined = false,
             "--stats" => stats = true,
             "--no-stats" => stats = false,
+            "-c" | "--continue" => resume = Some(Resume::Latest),
+            "-r" | "--resume" => resume = Some(Resume::Id(args.next().ok_or("-r needs a chat id")?)),
+            "--no-save" => save = false,
             _ => words.push(arg),
         }
     }
@@ -102,11 +122,49 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
         system
     });
     let tools = if tools { tools::schemas(claude) } else { Vec::new() };
-    Ok(Some(Args { system, max_tokens, prompt: words.join(" "), files, tools, stats }))
+    Ok(Some(Args { system, max_tokens, prompt: words.join(" "), files, tools, stats, resume, save }))
+}
+
+/// The saved chat to go on with, if one was asked for.
+fn resumed(args: &Args) -> Result<Option<Session>, Box<dyn Error>> {
+    let session = match &args.resume {
+        None => return Ok(None),
+        Some(Resume::Latest) => Session::latest()?,
+        Some(Resume::Id(id)) => Session::load(id)?,
+    };
+    let turns = session.turns.len();
+    eprintln!("nibble: going on with \"{}\" ({turns} turn{})", session.title(), if turns == 1 { "" } else { "s" });
+    Ok(Some(session))
+}
+
+/// Run one user turn, and keep it in the saved chat if there is one. A turn
+/// that fails is forgotten, so that it can be asked again.
+fn turn(messages: &mut Vec<Value>, user: &str, args: &Args, session: Option<&mut Session>) -> Result<(), Box<dyn Error>> {
+    let before = messages.len();
+    messages.push(message("user", user));
+    let mut terminal = chat::Terminal::default();
+    let mut recorder = Recorder { inner: &mut terminal, parts: Vec::new() };
+    let outcome = match chat::run(messages, &args.tools, args.max_tokens, &mut recorder) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            messages.truncate(before);
+            return Err(e);
+        }
+    };
+    show_stats(args, &outcome);
+    if let Some(session) = session.filter(|_| args.save) {
+        session.turns.push(serde_json::json!({ "user": user, "parts": recorder.parts }));
+        if let Err(e) = session.save() {
+            eprintln!("nibble: the chat was not saved: {e}");
+        }
+    }
+    Ok(())
 }
 
 fn repl(args: &Args) -> Result<(), Box<dyn Error>> {
-    let mut messages = vec![message("system", &args.system)];
+    let mut session = resumed(args)?.unwrap_or_else(Session::new);
+    let mut messages = session.messages(&args.system);
+    chat::trim(&mut messages);
     // Attached files go with the first message, and wait for one that gets an answer.
     let mut files = args.files.clone();
     let mut line = String::new();
@@ -115,22 +173,17 @@ fn repl(args: &Args) -> Result<(), Box<dyn Error>> {
         line.clear();
         if io::stdin().read_line(&mut line)? == 0 {
             eprintln!();
+            if args.save && !session.turns.is_empty() {
+                eprintln!("nibble: saved; `nibble -r {}` goes on with it", session.id);
+            }
             return Ok(());
         }
         if line.trim().is_empty() {
             continue;
         }
-        let before = messages.len();
-        messages.push(message("user", &format!("{}{files}", line.trim())));
-        match chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default()) {
-            Ok(outcome) => {
-                files.clear();
-                show_stats(args, &outcome);
-            }
-            Err(e) => {
-                eprintln!("nibble: {e}");
-                messages.truncate(before);
-            }
+        match turn(&mut messages, &format!("{}{files}", line.trim()), args, Some(&mut session)) {
+            Ok(()) => files.clear(),
+            Err(e) => eprintln!("nibble: {e}"),
         }
         chat::trim(&mut messages);
     }
@@ -194,6 +247,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             show_config();
             return Ok(());
         }
+        Some("chats") => {
+            sessions::show_list();
+            return Ok(());
+        }
         _ => {}
     }
     let input = piped_input()?;
@@ -226,10 +283,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         (false, true) => args.prompt.clone(),
         (false, false) => format!("{}\n\n<input>\n{input}\n</input>", args.prompt),
     } + &args.files;
-    let mut messages = vec![message("system", &args.system), message("user", &user)];
-    let outcome = chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default())?;
-    show_stats(&args, &outcome);
-    Ok(())
+    let mut session = resumed(&args)?;
+    let mut messages = match &session {
+        Some(session) => session.messages(&args.system),
+        None => vec![message("system", &args.system)],
+    };
+    chat::trim(&mut messages);
+    turn(&mut messages, &user, &args, session.as_mut())
 }
 
 fn main() -> ExitCode {

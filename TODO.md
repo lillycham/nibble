@@ -59,6 +59,11 @@
   time to the first token, on stderr. On when stderr is a terminal; `--stats`
   and `--no-stats` override. Token counts need a server that honours
   `stream_options.include_usage`; without them it gives the prompt in characters.
+- Saved chats on the command line, in the window's files, so either can go on
+  with a chat from the other. The terminal chat saves as it goes; `-c` goes on
+  with the newest, `-r ID` with any, and `nibble chats` lists them. A one-shot
+  prompt is saved only when it continues a chat. Tool results are not kept, so
+  a resumed chat carries the questions and answers only.
 
 ## Next
 
@@ -77,7 +82,6 @@
 ## Later
 
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
-- Sessions for the command line: save and resume chats (the window has them).
 - In the window's settings page: a field per model preset, and masking for the token.
 - Settings page: fill each empty field with the value really in use, not a
   grey hint that repeats a default written into the GUI. The server knows its
