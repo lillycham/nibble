@@ -81,6 +81,12 @@
   holds the server, the model list and Settings. Choices on the settings
   page are segmented controls. It builds and runs on Linux too, which is how
   it was checked (under Xvfb).
+- Quote-your-evidence mode: `-q` (and `quote` on `delegate`) asks the model to
+  end its answer with the lines it rests on, one per line as `> path: text`,
+  and checks each against the file it names: an attached file, the piped
+  input, or a file the model's tools could read (same confinement). Spacing
+  and `...` are forgiven; anything else not in the file is reported after the
+  answer. Opt-in, since the request costs about 80 tokens.
 
 ## Roadmap
 
@@ -95,9 +101,7 @@ The presets so far rest on a few questions asked by hand. Measure instead.
 - `nibble eval`: a small fixture project in the repo, about 20 questions with
   known answers. Reports correct answers, tool calls and time per model, so a
   new model or preset gets a fair trial in one command.
-- Quote-your-evidence mode: the model quotes the lines behind its answer, and
-  nibble checks that each quote appears in the file. Flags invented answers.
-  The eval measures whether it helps.
+- The eval measures whether quote-your-evidence mode (done, `-q`) helps.
 
 ### 3. The window as the main interface
 

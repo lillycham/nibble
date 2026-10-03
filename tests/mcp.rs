@@ -17,6 +17,13 @@ fn model_reply(request: &Value) -> Value {
     let system = messages[0]["content"].as_str().unwrap_or_default();
     let user = messages.iter().find(|m| m["role"] == "user").unwrap()["content"].as_str().unwrap_or_default();
     let text = |text: &str| json!({ "content": text });
+    if system.contains("give the evidence") && !user.contains("look for yourself") {
+        // One true quote, one invented.
+        return text("apples and cherries\n> a.txt: apples\n> b.txt: cherries");
+    }
+    if system.contains("give the evidence") && messages.iter().any(|m| m["role"] == "tool") {
+        return text("a.txt says apples\n> ./a.txt:1: apples\n> ../secret.txt: outside the root");
+    }
     if messages.iter().any(|m| m["role"] == "tool") {
         let result = messages.iter().rev().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap();
         text(&format!("a.txt says {}", if result.contains("apples") { "apples" } else { "nothing" }))
@@ -217,6 +224,15 @@ fn claude_can_delegate_and_map_through_nibble_mcp() {
     assert!(!error);
     assert_eq!(text, "status: ok\ntools used: read_file a.txt\nanswer:\na.txt says apples\n");
     assert!(seen.lock().unwrap().iter().rev().nth(1).unwrap()["tools"].is_array());
+
+    // With quote, each quote is looked for in the file it names.
+    let (text, error) = mcp.call("delegate", json!({ "task": "What fruit?", "paths": ["a.txt", "b.txt"], "quote": true }));
+    assert!(!error);
+    assert!(text.contains("\nquotes: 1 of 2 quotes not found:\n  b.txt: cherries (not in the file)\n"), "{text}");
+    let (text, error) =
+        mcp.call("delegate", json!({ "task": "look for yourself: what is in a.txt?", "quote": true }));
+    assert!(!error);
+    assert!(text.contains("\nquotes: 1 of 2 quotes not found:\n  ../secret.txt: outside the root (not a file it could read)\n"), "{text}");
 
     // map: one fresh conversation and one line per file. A file that can't be
     // read is a line saying so, not a failed call.

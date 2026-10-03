@@ -1,6 +1,7 @@
 mod chat;
 mod config;
 mod mcp;
+mod quotes;
 mod serve;
 mod sessions;
 mod tools;
@@ -19,6 +20,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use chat::message;
+use quotes::Sources;
 use sessions::{Recorder, Session};
 
 const USAGE: &str = "usage: nibble [options] [PROMPT...]
@@ -39,6 +41,8 @@ With no prompt and no pipe, nibble starts a chat, which is saved as it goes.
       --tools           let it read files even when input is piped in or
                         files are attached
       --no-claude       don't let the model ask Claude for help
+  -q, --quote           have the model quote the lines its answer rests on,
+                        and check that each quote is really in the file
       --anywhere        let the model read files outside the current directory
       --stats           after each answer, show its prompt size, tokens and speed
       --no-stats        don't (the default when stderr is not a terminal)
@@ -63,6 +67,8 @@ struct Args {
     stats: bool,
     resume: Option<Resume>,
     save: bool,
+    /// What quotes are checked against, in quote mode.
+    quotes: Option<Sources>,
 }
 
 enum Resume {
@@ -78,6 +84,8 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
     let (mut resume, mut save) = (None, true);
     let mut words = Vec::new();
     let mut files = String::new();
+    let mut attached = Vec::new();
+    let mut quote = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
@@ -85,13 +93,16 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
                 // The user named the file, so it may be anywhere: confinement
                 // is for the model's own reads.
                 let path = args.next().ok_or("-f needs a file")?;
-                files += &mcp::attach(&path, &tools::read_text(&tools::expand(&path))?);
+                let text = tools::read_text(&tools::expand(&path))?;
+                files += &mcp::attach(&path, &text);
+                attached.push((path, text));
             }
             "-s" | "--system" => system = Some(args.next().ok_or("-s needs a value")?),
             "-n" | "--max-tokens" => max_tokens = args.next().ok_or("-n needs a value")?.parse()?,
             "--no-tools" => tools = Some(false),
             "--tools" => tools = Some(true),
             "--no-claude" => claude = false,
+            "-q" | "--quote" => quote = true,
             "--anywhere" => confined = false,
             "--stats" => stats = true,
             "--no-stats" => stats = false,
@@ -121,8 +132,18 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
         }
         system
     });
+    let (system, quotes) = if quote {
+        let mut sources = Sources::new(tools);
+        for (path, text) in &attached {
+            sources.give(path, text);
+        }
+        let input = if piped { " For the <input>, write input as the path." } else { "" };
+        (format!("{system}{}{input}", quotes::SYSTEM_QUOTE), Some(sources))
+    } else {
+        (system, None)
+    };
     let tools = if tools { tools::schemas(claude) } else { Vec::new() };
-    Ok(Some(Args { system, max_tokens, prompt: words.join(" "), files, tools, stats, resume, save }))
+    Ok(Some(Args { system, max_tokens, prompt: words.join(" "), files, tools, stats, resume, save, quotes }))
 }
 
 /// The saved chat to go on with, if one was asked for.
@@ -151,6 +172,9 @@ fn turn(messages: &mut Vec<Value>, user: &str, args: &Args, session: Option<&mut
             return Err(e);
         }
     };
+    if let Some(sources) = &args.quotes {
+        eprintln!("nibble: {}", quotes::check(&outcome.reply, sources).report());
+    }
     show_stats(args, &outcome);
     if let Some(session) = session.filter(|_| args.save) {
         session.turns.push(serde_json::json!({ "user": user, "parts": recorder.parts }));
@@ -254,7 +278,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         _ => {}
     }
     let input = piped_input()?;
-    let Some(args) = parse_args(argv, !input.trim().is_empty())? else {
+    let Some(mut args) = parse_args(argv, !input.trim().is_empty())? else {
         println!("{USAGE}");
         return Ok(());
     };
@@ -275,6 +299,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         eprintln!("nibble: input is {} characters, so the middle is cut to fit {budget}", input.trim().len());
     }
     let input = chat::clip(input.trim(), budget);
+    if let Some(sources) = &mut args.quotes {
+        if !input.is_empty() {
+            sources.give("input", &input);
+        }
+    }
 
     let user = match (args.prompt.is_empty(), input.is_empty()) {
         (true, true) if io::stdin().is_terminal() => return repl(&args),
