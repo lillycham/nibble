@@ -10,8 +10,9 @@ git diff | nibble "Write a commit message for this diff."
 nibble "Which nixpkgs branch does the flake use?"
 nibble -f flake.nix "What does this flake build?"
 nibble -q "Where is the idle timeout set?"   # with quotes that are checked
-nibble            # a chat
+nibble            # a chat; /help lists its commands
 nibble -c         # go on with the last chat
+nibble commit     # a recipe: a commit message for the staged changes
 ```
 
 ## What is in it
@@ -30,8 +31,11 @@ nibble -c         # go on with the last chat
   many files, each in a fresh context. `delegate` takes `quote` too.
 - **`ask_claude`**: the other direction. The local model can pass a question
   that is too hard for it to `claude -p`.
+- **Plugins**: MCP servers whose tools a chat can ask for with `--plugin`.
 - **`nibble-gui`**: a native chat window, built with GPUI. Drop files on it to
   attach them to your next message, as `nibble -f` does.
+- **Slash commands**, in the chat and the window: `/new`, `/clear`, `/model`,
+  `/settings`, `/quote`, `/help`, and a command for each recipe.
 
 ## Run it
 
@@ -83,6 +87,35 @@ adds your own:
 
 The key is looked for in the model's name.
 
+## Recipes
+
+A recipe is a prompt kept under a name, with settings of its own. It is
+`/NAME some text` in the chat and the window, and `nibble NAME` on the
+command line, where the text after the name, piped input and `-f` files are
+what it works on. `summarise` and `commit` are built in; `nibble recipes`
+lists them all. Add your own in the config file:
+
+```json
+{
+  "recipes": {
+    "review": {
+      "description": "Look over a diff for mistakes",
+      "prompt": "List the bugs in this diff, most serious first:\n{input}",
+      "command": ["git", "diff"],
+      "tools": false,
+      "max_tokens": 600
+    }
+  }
+}
+```
+
+The text given goes where `{input}` is, or after the prompt. `command` is run
+when the recipe is given nothing else, and its output is the input; the
+window has no directory to run it in, so there the text has to be given.
+`system` replaces the system prompt and `quote` turns on quote mode, both for
+that one message. Setting a built-in recipe to `null` removes it. The
+home-manager module has the same as `services.nibble.recipes`.
+
 ## More than one model
 
 The chat page and the window have a list to switch models. It holds every
@@ -95,6 +128,33 @@ A restart of `nibble serve` goes back to `model`.
 `nibble eval` asks the model 20 questions about a small sample project and
 reports how many it got right, how many tool calls it made and how long it
 took. `--model NAME`, repeated, compares several models from the list.
+
+## Plugins
+
+A plugin is an MCP server, so the ones already written for other tools work
+here too. Set one up in the config file, and it stays off until a chat asks for
+it: `--plugin NAME` (or `-p`), `/plugin NAME` in the chat, or a recipe that
+lists it under `"plugins"`:
+
+```json
+{
+  "plugins": {
+    "git": {
+      "command": ["uvx", "mcp-server-git"],
+      "tools": ["git_status", "git_log", "git_diff"]
+    }
+  }
+}
+```
+
+Every tool's description is sent with every request, and a small model has
+little room, so plugins are never on by default. `tools` keeps only the ones
+you name; `nibble plugins` shows what each plugin offers and how many
+characters that adds to a request. `env` sets environment variables for it.
+
+A plugin runs in the current directory with your permissions, and nibble's own
+limits (read only, inside this directory) don't apply to it. Pick ones whose
+tools you'd let the model use.
 
 ## Reach
 

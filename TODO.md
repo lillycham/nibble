@@ -115,6 +115,27 @@
   with files sends `"tools": false`, which `POST /chat` now honours, so it
   gets no file tools, again as with `-f`. Sent messages show the files by
   name, and chats saved by `nibble -f` show the same way.
+- Slash commands in the window and the chat REPL: `/new`, `/clear` (start
+  over and delete the saved chat), `/model [NAME]` (part of a name will do),
+  `/settings`, `/quote` and `/help`. In the window, typing `/` lists them
+  above the field, Tab completes a name, and a unique start such as `/sum`
+  runs.
+- Recipes: named prompts with their own `system`, `max_tokens`, `tools`,
+  `quote` and `command`, in the config file's `recipes` section or the
+  module's `services.nibble.recipes`. `summarise` and `commit` are built in;
+  null removes one. They run as `/NAME TEXT` in the chat and the window, and
+  as `nibble NAME` on the command line, where the text, piped input or `-f`
+  files are the input, and with none of those `command`'s output is (so
+  `nibble commit` reads `git diff --staged`). `nibble recipes` lists them.
+  Names of built-in commands and subcommands are refused. A saved turn keeps
+  what was typed as `typed`, next to the full prompt in `user`, and shows it.
+  `POST /chat` takes `"recipe"` (the client sends the prompt, the server
+  applies the settings) and `/info` lists recipes with the other settings.
+- `/quote` in both, and `"quote": true` on `POST /chat`: `nibble serve`
+  checks the quotes against the files attached anywhere in the chat and the
+  files its tools may read, and the `done` event carries the result, shown
+  under the reply in the window. Quote mode stays on in the window until
+  turned off; it is not saved with the chat.
 
 ## Roadmap
 
@@ -172,20 +193,14 @@ and `-f FILE`.
 
 ### 5. Slash commands, then plugins
 
-- Slash commands in the window and the chat REPL: built-ins first (`/new`,
-  `/model`, `/clear`, `/settings`), then recipes, which are named prompts with
-  settings (`/summarise`, `/commit`), declared in the config file or the Nix
-  module. On the command line the same recipes are `nibble commit` and so on.
-- `/quote` in the window and the chat REPL: turn quote-your-evidence mode on
-  for the chat, and show which quotes were found under each reply. The window
-  goes through `POST /chat`, so that needs a `quote` field there and the check
-  done in `nibble serve`, against the files its chats may read. A natural
-  setting for recipes too.
-- Plugins, later. Open questions: the form (external programs that speak a
-  small JSON protocol, or nibble as an MCP client, which would reuse existing
-  MCP servers as plugins), and the context budget: each tool schema costs
-  tokens on every request, so plugins must be opt-in per recipe or per chat,
-  never on by default.
+- Done: slash commands, recipes and `/quote` (see Done).
+- Plugins. Decided: a plugin is an MCP server (stdio, tools only), so existing
+  servers work. Declared under "plugins" in the config file, off unless a chat
+  asks for it, because each tool schema costs tokens on every request. Done on
+  the command line: `--plugin NAME`, `nibble plugins`, `/plugin NAME` in the
+  chat, and a "plugins" list on recipes. Still to do: the window, which needs
+  a `plugins` field on `POST /chat` and a say on which plugins a web chat may
+  use. Until then a recipe run from the window gets no plugin tools.
 
 ### 6. Reach
 

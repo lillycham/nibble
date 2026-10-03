@@ -3,6 +3,7 @@
 //! It does keep the chats, as files, and it can edit nibble's config file.
 
 mod attach;
+mod commands;
 mod input;
 mod motion;
 mod settings;
@@ -32,7 +33,7 @@ use motion::Eased;
 use settings::{FIELDS, Kind};
 use store::{Chat, Entry, Part, Turn};
 
-actions!(nibble, [Submit, NewChat, OpenSettings, Quit]);
+actions!(nibble, [Submit, NewChat, OpenSettings, Quit, Complete]);
 
 /// Headings are set in Charter, which comes with macOS; everything else in
 /// Inter, which comes with the app (see `fonts/`); code in Menlo.
@@ -198,6 +199,8 @@ enum Event {
     Text(String),
     Tool(String),
     Error(String),
+    /// How many of the answer's quotes were found in the files, in quote mode.
+    Quotes(Value),
     /// The turn is over; what it cost.
     Done(Value),
 }
@@ -232,6 +235,9 @@ fn ask(server: &Server, body: &Value, stop: &AtomicBool, events: &mpsc::Unbounde
         } else if let Some(error) = data["error"].as_str() {
             Event::Error(error.to_string())
         } else if data["done"].as_bool() == Some(true) {
+            if data["quotes"].is_object() && events.unbounded_send(Event::Quotes(data["quotes"].clone())).is_err() {
+                break;
+            }
             Event::Done(data["stats"].clone())
         } else {
             continue;
@@ -297,6 +303,12 @@ struct Nibble {
     /// the last one dropped could not.
     attached: Vec<Attached>,
     attach_error: Option<String>,
+    /// Quote-your-evidence mode, for the messages that follow, and what was
+    /// found of each finished turn's quotes: whether all were, and a line.
+    quote: bool,
+    quotes: HashMap<usize, (bool, String)>,
+    /// What went wrong with the last command.
+    command_error: Option<String>,
     /// Goes up whenever the open chat changes, so a reply that is still
     /// arriving for the old one is dropped instead of landing in the new one.
     epoch: usize,
@@ -363,6 +375,9 @@ impl Nibble {
             running: None,
             attached: Vec::new(),
             attach_error: None,
+            quote: false,
+            quotes: HashMap::new(),
+            command_error: None,
             epoch: 0,
             fields,
             choices: vec![String::new(); FIELDS.len()],
@@ -485,12 +500,112 @@ impl Nibble {
         if self.input.read(cx).text().trim().is_empty() {
             return;
         }
+        self.command_error = None;
+        let typed = self.input.read(cx).text();
+        if let Some((name, rest)) = commands::split(&typed) {
+            let (name, rest) = (name.to_string(), rest.to_string());
+            return self.command(&name, &rest, window, cx);
+        }
         let text = self.input.update(cx, |input, cx| input.take(cx));
         let leaving = std::mem::take(&mut self.leaving);
         let files: String =
             self.attached.drain(..).filter(|file| !leaving.contains(&file.path)).map(|file| file.block).collect();
         self.attach_error = None;
         self.say(&format!("{}{files}", text.trim()), cx);
+    }
+
+    /// Run a slash command. The text stays in the field when it fails, so
+    /// that it can be put right.
+    fn command(&mut self, name: &str, rest: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = commands::resolve(name, &self.models.in_use) else {
+            self.command_error = Some(format!("There is no /{name}. Type / to see the commands."));
+            return cx.notify();
+        };
+        let done = |nibble: &mut Self, cx: &mut Context<Self>| {
+            nibble.input.update(cx, |input, cx| input.take(cx));
+        };
+        match name.as_str() {
+            "new" => {
+                done(self, cx);
+                self.new_chat(&NewChat, window, cx);
+            }
+            "clear" => {
+                done(self, cx);
+                let id = self.chat.id.clone();
+                self.delete_chat(&id, window, cx);
+            }
+            "settings" => {
+                done(self, cx);
+                self.open_settings(&OpenSettings, window, cx);
+            }
+            "help" => {
+                // The list of commands shows while the field holds a bare "/".
+                self.input.update(cx, |input, cx| input.set_text("/", cx));
+            }
+            "quote" => {
+                done(self, cx);
+                self.quote = !self.quote;
+            }
+            "model" if rest.is_empty() => {
+                done(self, cx);
+                if self.models.all.len() < 2 {
+                    self.command_error = Some("There is no other model to switch to.".into());
+                } else {
+                    self.picking = true;
+                    self.find_model(cx);
+                }
+            }
+            "model" => {
+                let wanted = rest.to_lowercase();
+                let exact = self.models.all.iter().find(|model| model.to_lowercase() == wanted);
+                let found: Vec<&String> = match exact {
+                    Some(model) => vec![model],
+                    None => self.models.all.iter().filter(|model| model.to_lowercase().contains(&wanted)).collect(),
+                };
+                match found.as_slice() {
+                    [model] => {
+                        let model = model.to_string();
+                        done(self, cx);
+                        self.pick_model(model, cx);
+                    }
+                    [] => self.command_error = Some(format!("No model is called “{rest}”.")),
+                    _ => self.command_error = Some(format!("“{rest}” could be more than one model.")),
+                }
+            }
+            recipe => {
+                let Some(recipe) = commands::recipes(&self.models.in_use).into_iter().find(|r| r.name == recipe) else {
+                    return;
+                };
+                if rest.is_empty() && self.attached.is_empty() && recipe.command {
+                    self.command_error = Some(format!("Put the text to work on after /{}, or drop a file.", recipe.name));
+                    return cx.notify();
+                }
+                done(self, cx);
+                let files: String = self.attached.drain(..).map(|file| file.block).collect();
+                self.attach_error = None;
+                let text = format!("{}{files}", commands::message(&recipe.prompt, rest));
+                let typed = format!("{}{files}", format!("/{} {rest}", recipe.name).trim_end());
+                self.send(&text, Some(typed), json!({ "recipe": recipe.name }), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Tab finishes the name of the command being typed, as far as the
+    /// commands that begin that way agree.
+    fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).text();
+        let Some(items) = commands::offer(&typed, &self.models.in_use) else { return };
+        let first = &items[0].name;
+        let mut common = first.len();
+        for item in &items[1..] {
+            common = first.bytes().zip(item.name.bytes()).take_while(|(a, b)| a == b).count().min(common);
+        }
+        let mut text = format!("/{}", &first[..common]);
+        if items.len() == 1 {
+            text.push(' ');
+        }
+        self.input.update(cx, |input, cx| input.set_text(&text, cx));
     }
 
     /// Attach files dropped on the window to the next message, each whole,
@@ -552,6 +667,12 @@ impl Nibble {
     }
 
     fn say(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.send(text, None, json!({}), cx);
+    }
+
+    /// Send a message. For a command, `typed` is what was typed, and `extra`
+    /// goes in the request: the recipe it is for.
+    fn send(&mut self, text: &str, typed: Option<String>, extra: Value, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
         }
@@ -564,12 +685,18 @@ impl Nibble {
             }
         }
         messages.push(json!({ "role": "user", "content": text }));
-        self.chat.turns.push(Turn { user: text.to_string(), parts: Vec::new() });
+        self.chat.turns.push(Turn { user: text.to_string(), typed, parts: Vec::new() });
         // Attached files are the whole task, so a chat with any gets no file
         // tools, as with `nibble -f`: an eager model goes looking otherwise.
         let mut body = json!({ "messages": messages });
         if self.chat.turns.iter().any(|turn| !attach::split(&turn.user).1.is_empty()) {
             body["tools"] = json!(false);
+        }
+        if self.quote {
+            body["quote"] = json!(true);
+        }
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            body[key] = value.clone();
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -610,6 +737,13 @@ impl Nibble {
             (Event::Text(text), _) => turn.parts.push(Part::Text(text)),
             (Event::Tool(tool), _) => turn.parts.push(Part::Tool(tool)),
             (Event::Error(error), _) => turn.parts.push(Part::Error(error)),
+            (Event::Quotes(quotes), _) => {
+                let all = quotes["missing"].as_u64() == Some(0) && quotes["found"].as_u64().is_some_and(|n| n > 0);
+                let report = quotes["report"].as_str().unwrap_or_default();
+                // Read as a sentence under the reply.
+                let line = format!("{}{}", report.get(..1).unwrap_or_default().to_uppercase(), report.get(1..).unwrap_or_default());
+                self.quotes.insert(self.chat.turns.len() - 1, (all, line));
+            }
             (Event::Done(stats), _) => {
                 if let Some(line) = stats_line(&stats) {
                     self.stats.insert(self.chat.turns.len() - 1, line);
@@ -657,6 +791,7 @@ impl Nibble {
         self.chat = chat;
         self.texts.clear();
         self.stats.clear();
+        self.quotes.clear();
         self.context = None;
         self.context_shown.reset(0.);
         self.view = View::Chat;
@@ -1305,6 +1440,7 @@ impl Nibble {
         waiting: bool,
         loading: bool,
         stats: Option<&String>,
+        quotes: Option<&(bool, String)>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -1328,7 +1464,7 @@ impl Nibble {
             .collect();
 
         // The files that went with the message show by name, not whole.
-        let (asked, files) = attach::split(&turn.user);
+        let (asked, files) = attach::split(turn.asked());
         let files: Vec<Div> = files.into_iter().map(|path| chip(path, theme)).collect();
         let answer = turn.answer();
         // The whole reply at once, code blocks and all.
@@ -1371,6 +1507,19 @@ impl Nibble {
                     .when(waiting && turn.answer().is_empty(), |log| {
                         // A cold start can take a while, so say what it is.
                         log.child(div().text_color(theme.ochre).child(if loading { "Loading the model…" } else { "Thinking…" }))
+                    })
+                    .when_some(quotes, |log, (all, line)| {
+                        // Whether the answer's quotes are really in the files.
+                        log.child(
+                            div()
+                                .pt_1()
+                                .flex()
+                                .gap(px(6.))
+                                .text_size(px(12.))
+                                .text_color(if *all { theme.sage } else { theme.rose })
+                                .child(div().flex_shrink_0().child(if *all { "✓" } else { "!" }))
+                                .child(div().min_w_0().child(SharedString::from(line.clone()))),
+                        )
                     })
                     .when(copy.is_some() || stats.is_some(), |log| {
                         log.child(
@@ -1426,7 +1575,7 @@ impl Nibble {
             ))
         } else {
             let (texts, count, running) = (&mut self.texts, self.chat.turns.len(), self.running.is_some());
-            let (stats, loading) = (&self.stats, self.models.state == "loading");
+            let (stats, quotes, loading) = (&self.stats, &self.quotes, self.models.state == "loading");
             // The page's own fade keeps these ids apart from one chat to the next.
             let shown_from = self.shown_from;
             let turns: Vec<_> = self
@@ -1436,7 +1585,7 @@ impl Nibble {
                 .enumerate()
                 .map(|(n, turn)| {
                     let waiting = running && n + 1 == count;
-                    let turn = Self::turn(texts, n, turn, waiting, loading, stats.get(&n), theme, cx);
+                    let turn = Self::turn(texts, n, turn, waiting, loading, stats.get(&n), quotes.get(&n), theme, cx);
                     // A turn that comes while the chat is open rises into place.
                     if n >= shown_from { motion::fade_in(turn, ("turn", n), 8.) } else { turn.into_any_element() }
                 })
@@ -1525,10 +1674,29 @@ impl Nibble {
                     .pl(px(20.))
                     .text_size(px(11.5))
                     .text_color(theme.muted)
-                    .child(match (running, &self.attach_error) {
+                    .child(match (running, self.command_error.as_ref().or(self.attach_error.as_ref())) {
                         (true, _) => div().child("↩ stops the reply"),
                         (false, Some(error)) => div().min_w_0().truncate().text_color(theme.rose).child(SharedString::from(error.clone())),
-                        (false, None) => div().child("↩ sends · ⇧↩ starts a new line · drop files to attach"),
+                        (false, None) => div().child("↩ sends · ⇧↩ new line · / for commands · drop files to attach"),
+                    })
+                    .when(self.quote, |row| {
+                        // Quote mode stays on until it is turned off, so say so where you type.
+                        row.child(
+                            div()
+                                .id("quoting")
+                                .flex_shrink_0()
+                                .px(px(6.))
+                                .rounded(px(4.))
+                                .bg(theme.blue_fill)
+                                .text_color(theme.blue)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|nibble, _, _, cx| {
+                                    cx.stop_propagation();
+                                    nibble.quote = false;
+                                    cx.notify();
+                                }))
+                                .child("Quoting evidence ×"),
+                        )
                     })
                     .child(div().flex_1())
                     .child(
@@ -1557,7 +1725,75 @@ impl Nibble {
             .flex_col()
             .overflow_hidden()
             .child(log)
-            .child(column(div().px_8().pt_1().pb_4().child(composer)))
+            .child(column(div().px_8().pt_1().pb_4().children(self.command_menu(theme, cx)).child(composer)))
+    }
+
+    /// While a command's name is being typed, the commands it could be,
+    /// above the field. A click puts one in the field.
+    fn command_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.view != View::Chat || self.running.is_some() {
+            return None;
+        }
+        let items = commands::offer(&self.input.read(cx).text(), &self.models.in_use)?;
+        let hover = theme.box_fill;
+        let rows = items.into_iter().enumerate().map(|(n, item)| {
+            let fill = format!("/{} ", item.name);
+            div()
+                .id(("command", n))
+                .flex()
+                .items_baseline()
+                .gap_3()
+                .px_3()
+                .py(px(5.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |nibble, _, window, cx| {
+                    nibble.input.update(cx, |input, cx| input.set_text(&fill, cx));
+                    window.focus(&nibble.input.focus_handle(cx));
+                }))
+                .child(
+                    div()
+                        .w(px(150.))
+                        .flex_shrink_0()
+                        .flex()
+                        .gap(px(6.))
+                        .font_family(MONO)
+                        .text_size(px(12.5))
+                        .child(div().text_color(theme.blue).child(SharedString::from(format!("/{}", item.name))))
+                        .when(!item.takes.is_empty(), |name| {
+                            name.child(div().text_color(theme.muted).child(SharedString::from(item.takes.clone())))
+                        }),
+                )
+                .child(div().min_w_0().truncate().text_size(px(12.5)).text_color(theme.ink_soft).child(SharedString::from(item.about)))
+        });
+        Some(
+            div()
+                .mb_2()
+                .p_1()
+                .flex()
+                .flex_col()
+                .rounded(px(8.))
+                .bg(theme.card)
+                .border_1()
+                .border_color(theme.box_line)
+                .shadow(vec![gpui::BoxShadow {
+                    color: theme.shadow,
+                    offset: gpui::point(px(0.), px(2.)),
+                    blur_radius: px(10.),
+                    spread_radius: px(-2.),
+                }])
+                .children(rows)
+                .child(
+                    div()
+                        .px_3()
+                        .pt_1()
+                        .pb(px(3.))
+                        .text_size(px(11.))
+                        .text_color(theme.muted)
+                        .child("⇥ completes · ↩ runs"),
+                ),
+        )
     }
 
     /// The model in use, and a list of the others to switch to when the
@@ -1906,6 +2142,7 @@ impl Render for Nibble {
         div()
             .key_context("Nibble")
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::complete))
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::open_settings))
             .on_drop(cx.listener(|nibble, paths: &ExternalPaths, window, cx| nibble.attach(paths.paths(), window, cx)))
@@ -1972,6 +2209,7 @@ fn main() {
         input::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("enter", Submit, None),
+            KeyBinding::new("tab", Complete, None),
             KeyBinding::new("cmd-n", NewChat, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-q", Quit, None),
