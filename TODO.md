@@ -55,6 +55,10 @@
   turns the tools off unless `--tools` is given. The user named the file, so
   it may be outside the current directory. Files over `input_chars` are
   refused, not cut; piped input gets what room is left.
+- Stats line per turn on the command line: prompt size, reply tokens, speed and
+  time to the first token, on stderr. On when stderr is a terminal; `--stats`
+  and `--no-stats` override. Token counts need a server that honours
+  `stream_options.include_usage`; without them it gives the prompt in characters.
 
 ## Next
 
@@ -72,7 +76,6 @@
 
 ## Later
 
-- Stats line per turn: prompt size, tokens, speed.
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
 - Sessions for the command line: save and resume chats (the window has them).
 - In the window's settings page: a field per model preset, and masking for the token.
