@@ -17,7 +17,7 @@ use futures::channel::mpsc;
 use gpui::{
     App, Application, Bounds, Context, Div, Entity, Focusable, Hsla, KeyBinding, ScrollHandle, SharedString, Stateful,
     TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div,
-    prelude::*, px, rgb, size,
+    point, prelude::*, px, rgb, size,
 };
 use serde_json::{Map, Value, json};
 
@@ -27,27 +27,54 @@ use store::{Chat, Entry, Part, Turn};
 
 actions!(nibble, [Submit, NewChat, OpenSettings, Quit]);
 
-/// The same colours as the web page.
+/// Code, here and in replies. SF Mono is not one of the fonts macOS offers
+/// to apps, so Menlo.
+const MONO: &str = "Menlo";
+
+/// The column that the chat and the settings are set in, and how far the
+/// sidebar and the bar along the top reach.
+const COLUMN: f32 = 680.;
+const SIDEBAR: f32 = 224.;
+const BAR: f32 = 46.;
+
+/// After macOS's own look: a grey source list beside the page, one indigo
+/// accent, and your own messages tinted with it.
 struct Theme {
-    bg: Hsla,
+    page: Hsla,
+    side: Hsla,
     fg: Hsla,
+    side_fg: Hsla,
     dim: Hsla,
     line: Hsla,
     user: Hsla,
+    user_fg: Hsla,
     code: Hsla,
+    selected: Hsla,
     accent: Hsla,
+    on_accent: Hsla,
+    error: Hsla,
+    ok: Hsla,
+    shadow: Hsla,
 }
 
 impl Theme {
     fn of(window: &Window) -> Self {
-        let colours = match window.appearance() {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => {
-                [0x1c1a18, 0xe9e3da, 0x8f867c, 0x35302b, 0x2a2622, 0x26221f, 0xe08a5b]
-            }
-            _ => [0xfaf8f5, 0x2b2622, 0x8a8078, 0xe6e0d8, 0xefe9e0, 0xf1ece4, 0xb4572e],
+        let dark = matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
+        let colours = if dark {
+            [
+                0x1e1f22, 0x26272b, 0xe8e9ec, 0xc9cad0, 0x8b8e95, 0x303136, 0x2b3260, 0xdfe4ff, 0x17181b,
+                0x37383e, 0x8d9bff, 0x14162b, 0xff7b72, 0x32d74b,
+            ]
+        } else {
+            [
+                0xffffff, 0xecedf0, 0x1c1d20, 0x3a3d44, 0x83868d, 0xe3e4e8, 0xe6ebff, 0x1d2a5c, 0xf5f6f8,
+                0xdcdfe7, 0x4a5bd8, 0xffffff, 0xc4413a, 0x34c759,
+            ]
         };
-        let [bg, fg, dim, line, user, code, accent] = colours.map(|hex| Hsla::from(rgb(hex)));
-        Theme { bg, fg, dim, line, user, code, accent }
+        let [page, side, fg, side_fg, dim, line, user, user_fg, code, selected, accent, on_accent, error, ok] =
+            colours.map(|hex| Hsla::from(rgb(hex)));
+        let shadow = gpui::black().opacity(if dark { 0.5 } else { 0.12 });
+        Theme { page, side, fg, side_fg, dim, line, user, user_fg, code, selected, accent, on_accent, error, ok, shadow }
     }
 }
 
@@ -494,6 +521,12 @@ impl Nibble {
         };
         cx.notify();
     }
+
+    /// Set a choice to one value, or to unset with an empty one.
+    fn choose(&mut self, n: usize, value: &str, cx: &mut Context<Self>) {
+        self.choices[n] = value.to_string();
+        cx.notify();
+    }
 }
 
 impl Nibble {
@@ -553,39 +586,145 @@ impl Nibble {
     }
 }
 
-/// Just enough Markdown for a chat: fenced code gets its own block.
-fn reply(text: &str, theme: &Theme) -> impl IntoElement {
-    div().flex().flex_col().gap_2().children(text.split("```").enumerate().filter(|(_, part)| !part.trim().is_empty()).map(
+/// Just enough Markdown for a chat: fenced code gets its own block, with its
+/// language and a button that copies it.
+fn reply(text: &str, id: &str, theme: &Theme) -> impl IntoElement {
+    div().flex().flex_col().gap_3().children(text.split("```").enumerate().filter(|(_, part)| !part.trim().is_empty()).map(
         |(n, part)| {
             if n % 2 == 1 {
                 // The first line of a fence is its language tag.
-                let code = part.split_once('\n').map_or(part, |(_, code)| code).trim_end();
+                let (language, code) = part.split_once('\n').unwrap_or(("", part));
+                let code = code.trim_end().to_string();
+                let shown = SharedString::from(code.clone());
+                let language = if language.trim().is_empty() { "code" } else { language.trim() };
                 div()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(theme.line)
                     .bg(theme.code)
-                    .rounded_md()
-                    .p_2()
-                    .font_family("Menlo")
-                    .text_size(px(12.5))
-                    .child(SharedString::from(code.to_string()))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_3()
+                            .py(px(5.))
+                            .border_b_1()
+                            .border_color(theme.line)
+                            .text_size(px(11.5))
+                            .text_color(theme.dim)
+                            .child(SharedString::from(language.to_string()))
+                            .child(link(SharedString::from(format!("{id}-code-{n}")), "Copy", theme).on_click(
+                                move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone())),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .line_height(px(19.))
+                            .child(shown),
+                    )
+                    .into_any_element()
             } else {
-                div().child(SharedString::from(part.trim().to_string()))
+                div().line_height(px(21.)).child(SharedString::from(part.trim().to_string())).into_any_element()
             }
         },
     ))
 }
 
-fn button(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, theme: &Theme) -> Stateful<Div> {
-    let hover = theme.dim;
+/// A tool call as a chip: what the model did, and to what.
+fn tool_chip(tool: &str, theme: &Theme) -> Div {
+    let (name, about) = tool.split_once(' ').unwrap_or((tool, ""));
+    let verb = match name {
+        "read_file" => "Read",
+        "list_dir" => "Listed",
+        "search" => "Searched",
+        "ask_claude" => "Asked Claude",
+        other => other,
+    };
+    let about: String = match about.chars().count() {
+        0..=48 => about.to_string(),
+        _ => about.chars().take(47).chain(['…']).collect(),
+    };
     div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded_md()
+        .flex()
+        .items_center()
+        .gap_1()
+        .max_w_full()
+        .px(px(9.))
+        .py(px(2.))
+        .rounded_full()
+        .bg(theme.code)
         .border_1()
         .border_color(theme.line)
-        .hover(move |style| style.border_color(hover))
+        .text_size(px(12.))
+        .text_color(theme.dim)
+        .child(SharedString::from(verb.to_string()))
+        .when(!about.is_empty() && about != ".", |chip| {
+            chip.child(
+                div().min_w_0().truncate().font_family(MONO).text_size(px(11.)).text_color(theme.fg).child(about),
+            )
+        })
+}
+
+fn capital(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or(String::new(), |first| first.to_uppercase().chain(chars).collect())
+}
+
+/// Small grey text that acts when clicked.
+fn link(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, theme: &Theme) -> Stateful<Div> {
+    let hover = theme.fg;
+    div()
+        .id(id)
+        .text_size(px(11.5))
+        .text_color(theme.dim)
         .cursor_pointer()
+        .hover(move |style| style.text_color(hover))
         .child(label.into())
+}
+
+/// A quiet button: no border until the pointer is on it.
+fn button(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, theme: &Theme) -> Stateful<Div> {
+    let hover = theme.selected;
+    div()
+        .id(id)
+        .px(px(9.))
+        .py(px(3.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .child(label.into())
+}
+
+/// The strip along the top of a pane, under the window's own buttons, which
+/// zooms the window when double-clicked like any title bar.
+fn title_bar(id: &'static str, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(BAR))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_b_1()
+        .border_color(theme.line)
+        .on_click(|event, window, _| {
+            if event.click_count() == 2 {
+                window.titlebar_double_click();
+            }
+        })
+}
+
+/// Centre the content of a pane in a column of readable width.
+fn column(content: impl IntoElement) -> Div {
+    div().w_full().flex().flex_col().items_center().child(div().w_full().max_w(px(COLUMN)).child(content))
 }
 
 impl Nibble {
@@ -593,26 +732,35 @@ impl Nibble {
         let rows = self.chats.iter().enumerate().map(|(n, entry)| {
             let (open_id, delete_id) = (entry.id.clone(), entry.id.clone());
             let current = self.view == View::Chat && entry.id == self.chat.id;
-            let hover = theme.user;
+            let (hover, dim, fg, line) = (theme.selected.opacity(0.6), theme.dim, theme.fg, theme.line);
             div()
                 .id(("chat", n))
+                .group("chat-row")
                 .flex()
                 .items_center()
                 .gap_1()
-                .px_2()
-                .py_1()
-                .rounded_md()
+                .pl_2()
+                .pr_1()
+                .py(px(4.))
+                .rounded(px(7.))
                 .cursor_pointer()
-                .when(current, |row| row.bg(theme.user))
-                .hover(move |style| style.bg(hover))
+                .when(current, |row| row.bg(theme.selected).text_color(theme.fg).font_weight(gpui::FontWeight::MEDIUM))
+                .when(!current, |row| row.hover(move |style| style.bg(hover)))
                 .on_click(cx.listener(move |nibble, _, window, cx| nibble.open_chat(&open_id, window, cx)))
-                .child(div().flex_1().overflow_hidden().truncate().child(SharedString::from(entry.title.clone())))
+                .child(div().flex_1().min_w_0().truncate().child(SharedString::from(entry.title.clone())))
                 .child(
+                    // Only there while the pointer is on the row.
                     div()
                         .id(("delete", n))
-                        .px_1()
-                        .text_color(theme.dim)
-                        .hover(|style| style.text_color(gpui::red()))
+                        .size(px(18.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .text_color(gpui::transparent_black())
+                        .group_hover("chat-row", move |style| style.text_color(dim))
+                        .hover(move |style| style.bg(line).text_color(fg))
                         .on_click(cx.listener(move |nibble, _, window, cx| {
                             // Not also a click on the row, which would open the chat.
                             cx.stop_propagation();
@@ -622,112 +770,284 @@ impl Nibble {
                 )
         });
 
+        let reached = !self.models.current.is_empty();
+        let address = self.server.url.trim_start_matches("http://").trim_start_matches("https://").to_string();
+        let new_hover = theme.selected;
+
         div()
-            .w(px(200.))
+            .w(px(SIDEBAR))
             .flex_shrink_0()
             .h_full()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_2()
+            .bg(theme.side)
+            .text_color(theme.side_fg)
             .border_r_1()
             .border_color(theme.line)
             .text_size(px(13.))
             .child(
-                button("new", "New chat", theme)
-                    .on_click(cx.listener(|nibble, _, window, cx| nibble.new_chat(&NewChat, window, cx))),
+                // The window's own three buttons sit at the left of this strip.
+                div()
+                    .id("side-bar")
+                    .h(px(BAR))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .px_2()
+                    .on_click(|event, window, _| {
+                        if event.click_count() == 2 {
+                            window.titlebar_double_click();
+                        }
+                    })
+                    .child(
+                        div()
+                            .id("new")
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(7.))
+                            .text_size(px(19.))
+                            .text_color(theme.dim)
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(new_hover))
+                            .on_click(cx.listener(|nibble, _, window, cx| {
+                                cx.stop_propagation();
+                                nibble.new_chat(&NewChat, window, cx)
+                            }))
+                            .child("+"),
+                    ),
             )
-            .child(div().id("chats").flex_1().overflow_y_scroll().flex().flex_col().gap_1().children(rows))
             .child(
-                button("settings", "Settings", theme)
-                    .when(self.view == View::Settings, |button| button.bg(theme.user))
-                    .on_click(cx.listener(|nibble, _, window, cx| nibble.open_settings(&OpenSettings, window, cx))),
+                div()
+                    .px_4()
+                    .pt_1()
+                    .pb_1()
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.dim)
+                    .child("Chats"),
+            )
+            .child(
+                div()
+                    .id("chats")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .px_2()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .children(rows)
+                    .when(self.chats.is_empty(), |list| {
+                        list.child(div().px_2().py_1().text_color(theme.dim).child("Saved chats appear here."))
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl_4()
+                    .pr_2()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(theme.line)
+                    .text_size(px(12.))
+                    .text_color(theme.dim)
+                    .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(if reached { theme.ok } else { theme.dim }))
+                    .child(div().flex_1().min_w_0().truncate().child(address))
+                    .child(
+                        button("settings", "Settings", theme)
+                            .when(self.view == View::Settings, |button| button.bg(theme.selected).text_color(theme.fg))
+                            .on_click(cx.listener(|nibble, _, window, cx| nibble.open_settings(&OpenSettings, window, cx))),
+                    ),
             )
     }
 
-    fn chat_view(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let log = div().id("log").flex_1().overflow_y_scroll().track_scroll(&self.scroll).px_4().children(
-            self.chat.turns.iter().enumerate().map(|(n, turn)| {
-                let answer = turn.answer();
-                // The text can't be selected, so offer the whole reply.
-                let copy = (!answer.trim().is_empty()).then(|| {
-                    div()
-                        .id(("copy", n))
-                        .text_color(theme.dim)
-                        .text_size(px(12.))
-                        .cursor_pointer()
-                        .hover(|style| style.underline())
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(answer.trim().to_string()));
-                        }))
-                        .child("Copy")
-                });
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .py_2()
-                    .child(div().bg(theme.user).rounded_lg().px_3().py_2().child(SharedString::from(turn.user.clone())))
-                    .children(turn.parts.iter().map(|part| match part {
-                        Part::Text(text) => reply(text, theme).into_any_element(),
-                        Part::Tool(tool) => {
-                            div().text_color(theme.dim).text_size(px(12.)).child(format!("· {tool}")).into_any_element()
-                        }
-                        Part::Error(error) => div()
-                            .text_color(theme.accent)
-                            .text_size(px(12.))
+    /// One turn: your message, then what the model did and said.
+    fn turn(&self, n: usize, turn: &Turn, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let last = n + 1 == self.chat.turns.len();
+        let waiting = last && self.running.is_some();
+
+        // Tool calls in a row share a line of chips.
+        let mut parts: Vec<gpui::AnyElement> = Vec::new();
+        let mut chips: Vec<Div> = Vec::new();
+        let flush = |chips: &mut Vec<Div>, parts: &mut Vec<gpui::AnyElement>| {
+            if !chips.is_empty() {
+                parts.push(div().flex().flex_wrap().gap(px(6.)).children(chips.drain(..)).into_any_element());
+            }
+        };
+        for (k, part) in turn.parts.iter().enumerate() {
+            match part {
+                Part::Tool(tool) => chips.push(tool_chip(tool, theme)),
+                Part::Text(text) => {
+                    flush(&mut chips, &mut parts);
+                    parts.push(reply(text, &format!("turn-{n}-{k}"), theme).into_any_element());
+                }
+                Part::Error(error) => {
+                    flush(&mut chips, &mut parts);
+                    parts.push(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .rounded(px(8.))
+                            .bg(theme.error.opacity(0.1))
+                            .text_color(theme.error)
+                            .text_size(px(12.5))
                             .child(SharedString::from(error.clone()))
                             .into_any_element(),
-                    }))
-                    .children(copy.map(|copy| div().flex().child(copy)))
-            }),
-        );
+                    );
+                }
+            }
+        }
+        flush(&mut chips, &mut parts);
+        if waiting && turn.answer().is_empty() {
+            parts.push(div().text_color(theme.dim).child("Thinking…").into_any_element());
+        }
+
+        let answer = turn.answer();
+        // The text can't be selected, so offer the whole reply.
+        let copy = (!waiting && !answer.trim().is_empty()).then(|| {
+            link(("copy", n), "Copy reply", theme).on_click(cx.listener(move |_, _, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(answer.trim().to_string()));
+            }))
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div().flex().justify_end().pl_12().child(
+                    div()
+                        .bg(theme.user)
+                        .text_color(theme.user_fg)
+                        .px(px(13.))
+                        .py(px(8.))
+                        .rounded(px(16.))
+                        .rounded_br(px(5.))
+                        .line_height(px(20.))
+                        .child(SharedString::from(turn.user.clone())),
+                ),
+            )
+            .children(parts)
+            .children(copy.map(|copy| div().flex().child(copy)))
+    }
+
+    fn chat_view(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = if self.models.current.is_empty() { "a small local model" } else { self.models.current.as_str() };
+        let log = if self.chat.turns.is_empty() {
+            // Nothing said yet: a quiet welcome in the middle of the pane.
+            div()
+                .id("log")
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .px_6()
+                .child(
+                    div()
+                        .text_size(px(28.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.fg)
+                        .child("nibble"),
+                )
+                .child(
+                    div()
+                        .text_color(theme.dim)
+                        .child(SharedString::from(format!("Ask something small. {model} answers through nibble serve."))),
+                )
+        } else {
+            let turns: Vec<_> =
+                self.chat.turns.iter().enumerate().map(|(n, turn)| self.turn(n, turn, theme, cx).into_any_element()).collect();
+            div()
+                .id("log")
+                .flex_1()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(column(div().px_6().pt_5().pb_4().flex().flex_col().gap_6().children(turns)))
+        };
+
+        let focused = self.input.focus_handle(cx).is_focused(window);
+        let running = self.running.is_some();
+        let ready = running || !self.input.read(cx).text().trim().is_empty();
+        let (accent, dim) = (theme.accent, theme.dim);
+        let composer = div()
+            .id("composer")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pl(px(14.))
+            .pr(px(9.))
+            .pt(px(10.))
+            .pb(px(9.))
+            .rounded(px(14.))
+            .bg(theme.page)
+            .border_1()
+            .border_color(if focused { theme.accent.opacity(0.55) } else { theme.line })
+            .shadow(vec![gpui::BoxShadow {
+                color: theme.shadow,
+                offset: gpui::point(px(0.), px(4.)),
+                blur_radius: px(18.),
+                spread_radius: px(-6.),
+            }])
+            .cursor_text()
+            .on_click(cx.listener(|nibble, _, window, cx| window.focus(&nibble.input.focus_handle(cx))))
+            .child(self.input.clone())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(11.5))
+                    .text_color(theme.dim)
+                    .child(if running { "↩ stops the reply" } else { "↩ sends" })
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("send")
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(if ready { accent } else { dim.opacity(0.35) })
+                            .text_color(theme.on_accent)
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_size(px(if running { 10. } else { 15. }))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|nibble, _, window, cx| {
+                                cx.stop_propagation();
+                                nibble.submit(&Submit, window, cx)
+                            }))
+                            .child(if running { "■" } else { "↑" }),
+                    ),
+            );
 
         div()
             .flex_1()
+            .min_w_0()
             .h_full()
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .child(div().font_weight(gpui::FontWeight::BOLD).child("nibble"))
-                    .child(self.model_picker(theme, cx))
-                    .when_some(self.model_error.clone(), |row, error| {
-                        row.child(div().text_color(theme.accent).text_size(px(12.)).child(error))
-                    })
-                    .child(div().flex_1()),
-            )
+            .child(title_bar("chat-bar", theme).child(self.model_picker(theme, cx)))
+            .when_some(self.model_error.clone(), |pane, error| {
+                pane.child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .bg(theme.error.opacity(0.1))
+                        .text_color(theme.error)
+                        .text_size(px(12.))
+                        .child(error),
+                )
+            })
             .child(log)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(theme.line)
-                    .child(
-                        div()
-                            .flex_1()
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(theme.line)
-                            .child(self.input.clone()),
-                    )
-                    .child(
-                        button("send", if self.running.is_some() { "Stop" } else { "Send" }, theme)
-                            .on_click(cx.listener(|nibble, _, window, cx| nibble.submit(&Submit, window, cx))),
-                    ),
-            )
+            .child(column(div().px_6().pt_1().pb_4().child(composer)))
     }
 
     /// The model in use, and a list of the others to switch to when the
@@ -736,20 +1056,24 @@ impl Nibble {
         let current = &self.models.current;
         let label = if current.is_empty() { "a small local model".to_string() } else { current.clone() };
         if self.models.all.len() < 2 {
-            return div().text_color(theme.dim).text_size(px(12.)).child(label).into_any_element();
+            return div().font_weight(gpui::FontWeight::SEMIBOLD).child(label).into_any_element();
         }
-        let hover = theme.user;
+        let hover = theme.selected;
         let rows = self.models.all.iter().enumerate().map(|(n, model)| {
             let picked = model.clone();
+            let on = model == current;
             div()
                 .id(("model", n))
+                .flex()
+                .items_center()
+                .gap_2()
                 .px_2()
-                .py_1()
-                .rounded_md()
+                .py(px(5.))
+                .rounded(px(6.))
                 .cursor_pointer()
-                .when(model == current, |row| row.font_weight(gpui::FontWeight::BOLD))
                 .hover(move |style| style.bg(hover))
                 .on_click(cx.listener(move |nibble, _, _, cx| nibble.pick_model(picked.clone(), cx)))
+                .child(div().w(px(12.)).text_color(theme.accent).child(if on { "✓" } else { "" }))
                 .child(SharedString::from(model.clone()))
         });
         let menu = div()
@@ -757,15 +1081,16 @@ impl Nibble {
             .occlude()
             .mt_1()
             .p_1()
-            .min_w(px(220.))
+            .min_w(px(260.))
             .flex()
             .flex_col()
-            .bg(theme.bg)
+            .bg(theme.page)
             .border_1()
             .border_color(theme.line)
-            .rounded_lg()
-            .shadow_md()
+            .rounded(px(10.))
+            .shadow_lg()
             .text_size(px(13.))
+            .font_weight(gpui::FontWeight::NORMAL)
             .on_mouse_down_out(cx.listener(|nibble, _, _, cx| {
                 if !nibble.on_picker {
                     nibble.picking = false;
@@ -779,21 +1104,24 @@ impl Nibble {
                 div()
                     .id("model")
                     .flex()
+                    .items_center()
                     .gap_1()
-                    .px_2()
-                    .rounded_md()
-                    .text_color(theme.dim)
-                    .text_size(px(12.))
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(7.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover))
+                    .when(self.picking, |button| button.bg(hover))
                     .on_hover(cx.listener(|nibble, hovered: &bool, _, _| nibble.on_picker = *hovered))
-                    .on_click(cx.listener(|nibble, _, _, cx| nibble.toggle_models(cx)))
+                    .on_click(cx.listener(|nibble, _, _, cx| {
+                        cx.stop_propagation();
+                        nibble.toggle_models(cx)
+                    }))
                     .child(label)
-                    .child("▾"),
+                    .child(div().text_size(px(10.)).text_color(theme.dim).child("▾")),
             )
-            .when(self.picking, |picker| {
-                picker.child(deferred(anchored().child(menu)))
-            })
+            .when(self.picking, |picker| picker.child(deferred(anchored().child(menu))))
             .into_any_element()
     }
 
@@ -801,18 +1129,50 @@ impl Nibble {
         let file = settings::path().map_or("no config file: HOME is not set".to_string(), |path| path.display().to_string());
         let rows = FIELDS.iter().enumerate().map(|(n, field)| {
             let control = match field.kind {
-                Kind::Choice(_) => {
-                    let picked = &self.choices[n];
-                    let label = if picked.is_empty() { self.hints[n].clone() } else { picked.clone() };
-                    button(("choice", n), label, theme)
-                        .when(picked.is_empty(), |button| button.text_color(theme.dim))
-                        .on_click(cx.listener(move |nibble, _, _, cx| nibble.cycle(n, cx)))
+                Kind::Choice(options) => {
+                    // A segmented control: the default, then each option.
+                    let picked = self.choices[n].clone();
+                    let segments = [("", "Default")].into_iter().chain(options.iter().map(|option| (*option, *option)));
+                    let (page, shadow, hover) = (theme.page, theme.shadow, theme.fg);
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div().flex().p(px(2.)).gap(px(2.)).rounded(px(8.)).bg(theme.code).border_1().border_color(theme.line).children(
+                                segments.enumerate().map(|(k, (value, label))| {
+                                    let on = picked == value;
+                                    div()
+                                        .id(("choice", n * 8 + k))
+                                        .px_3()
+                                        .py(px(3.))
+                                        .rounded(px(6.))
+                                        .cursor_pointer()
+                                        .text_color(if on { theme.fg } else { theme.dim })
+                                        .when(on, |segment| {
+                                            segment.bg(page).shadow(vec![gpui::BoxShadow {
+                                                color: shadow,
+                                                offset: gpui::point(px(0.), px(1.)),
+                                                blur_radius: px(2.),
+                                                spread_radius: px(0.),
+                                            }])
+                                        })
+                                        .when(!on, |segment| segment.hover(move |style| style.text_color(hover)))
+                                        .on_click(cx.listener(move |nibble, _, _, cx| nibble.choose(n, value, cx)))
+                                        .child(SharedString::from(capital(label)))
+                                }),
+                            ),
+                        )
+                        .when(picked.is_empty(), |row| {
+                            row.child(div().text_size(px(11.5)).text_color(theme.dim).child(self.hints[n].clone()))
+                        })
                         .into_any_element()
                 }
                 _ => div()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(8.))
+                    .bg(theme.page)
                     .border_1()
                     .border_color(theme.line)
                     .child(self.fields[n].clone())
@@ -821,48 +1181,87 @@ impl Nibble {
             div()
                 .flex()
                 .flex_col()
-                .gap_1()
-                .child(div().text_color(theme.dim).text_size(px(12.)).child(field.label))
+                .gap(px(6.))
+                .px_4()
+                .py_3()
+                .when(n > 0, |row| row.border_t_1().border_color(theme.line))
+                .child(div().font_weight(gpui::FontWeight::MEDIUM).child(field.label))
                 .child(control)
         });
 
+        let about = if settings::load().is_empty() {
+            "There is no config file yet, so everything is at its default. Each field shows that default in grey; \
+             fill in only what you want to change. These settings are shared with the nibble command."
+        } else {
+            "An empty field is at its default, shown in grey. These settings are shared with the nibble command."
+        };
+        let (accent, on_accent) = (theme.accent, theme.on_accent);
+
         div()
-            .id("settings-page")
             .flex_1()
+            .min_w_0()
             .h_full()
-            .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap_3()
-            .px_4()
-            .py_3()
-            .child(div().font_weight(gpui::FontWeight::BOLD).child("Settings"))
-            .child(div().text_color(theme.dim).text_size(px(12.)).child(file))
-            .child(div().text_color(theme.dim).text_size(px(12.)).child(if settings::load().is_empty() {
-                "There is no config file yet, so everything is at its default. Each field shows that default in grey; \
-                 fill in only what you want to change. These settings are shared with the nibble command."
-            } else {
-                "An empty field is at its default, shown in grey. These settings are shared with the nibble command."
-            }))
-            .children(rows)
+            .child(title_bar("settings-bar", theme).font_weight(gpui::FontWeight::SEMIBOLD).child("Settings"))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        button("save", "Save", theme)
-                            .on_click(cx.listener(|nibble, _, window, cx| nibble.save_settings(window, cx))),
-                    )
-                    .when_some(self.notice.clone(), |row, (is_error, text)| {
-                        row.child(
+                div().id("settings-page").flex_1().overflow_y_scroll().child(column(
+                    div()
+                        .px_6()
+                        .py_5()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
                             div()
-                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
                                 .text_size(px(12.))
-                                .text_color(if is_error { theme.accent } else { theme.dim })
-                                .child(text),
+                                .text_color(theme.dim)
+                                .child(div().font_family(MONO).text_size(px(11.5)).child(file))
+                                .child(about),
                         )
-                    }),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .rounded(px(12.))
+                                .border_1()
+                                .border_color(theme.line)
+                                .bg(theme.code)
+                                .children(rows),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .id("save")
+                                        .px_4()
+                                        .py(px(6.))
+                                        .rounded(px(8.))
+                                        .bg(accent)
+                                        .text_color(on_accent)
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(accent.opacity(0.85)))
+                                        .on_click(cx.listener(|nibble, _, window, cx| nibble.save_settings(window, cx)))
+                                        .child("Save"),
+                                )
+                                .when_some(self.notice.clone(), |row, (is_error, text)| {
+                                    row.child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(12.))
+                                            .text_color(if is_error { theme.error } else { theme.dim })
+                                            .child(text),
+                                    )
+                                }),
+                        ),
+                )),
             )
     }
 }
@@ -877,7 +1276,7 @@ impl Render for Nibble {
             });
         }
         let main = match self.view {
-            View::Chat => self.chat_view(&theme, cx).into_any_element(),
+            View::Chat => self.chat_view(&theme, window, cx).into_any_element(),
             View::Settings => self.settings_view(&theme, cx).into_any_element(),
         };
         div()
@@ -887,9 +1286,9 @@ impl Render for Nibble {
             .on_action(cx.listener(Self::open_settings))
             .size_full()
             .flex()
-            .bg(theme.bg)
+            .bg(theme.page)
             .text_color(theme.fg)
-            .text_size(px(14.))
+            .text_size(px(13.5))
             .child(self.sidebar(&theme, cx))
             .child(main)
     }
@@ -917,10 +1316,17 @@ fn main() {
         })
         .detach();
 
-        let bounds = Bounds::centered(None, size(px(820.), px(720.)), cx);
+        let bounds = Bounds::centered(None, size(px(940.), px(740.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some("nibble".into()), ..Default::default() }),
+            // The page runs up under the title bar, and the window's three
+            // buttons sit in the sidebar's top strip.
+            titlebar: Some(TitlebarOptions {
+                title: Some("nibble".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(16.), px(17.))),
+            }),
+            window_min_size: Some(size(px(600.), px(420.))),
             ..Default::default()
         };
         cx.open_window(options, |window, cx| {
