@@ -4,6 +4,7 @@
 
 mod attach;
 mod input;
+mod motion;
 mod settings;
 mod store;
 
@@ -27,6 +28,7 @@ use serde_json::{Map, Value, json};
 
 use attach::Attached;
 use input::TextInput;
+use motion::Eased;
 use settings::{FIELDS, Kind};
 use store::{Chat, Entry, Part, Turn};
 
@@ -269,6 +271,20 @@ struct Nibble {
     /// 0 to 1: once full, the oldest messages are left out.
     context: Option<f32>,
     scroll: ScrollHandle,
+
+    // What eases rather than jumps: the turns from `shown_from` on, which
+    // came while the chat was open; the page, each time it or the chat
+    // changes; the status dot's colour and the context figure.
+    shown_from: usize,
+    page: usize,
+    dot: Eased<Hsla>,
+    context_shown: Eased<f32>,
+    /// Files fading out after a click on their ×.
+    leaving: Vec<String>,
+    /// Whether files were dragged over the window at the last look, and
+    /// whether the overlay is fading out now that they no longer are.
+    dragging: bool,
+    overlay_leaving: bool,
     /// Set while a reply is arriving. Raising the flag stops it.
     running: Option<Arc<AtomicBool>>,
     /// Files dropped on the window, to go with the next message, and why
@@ -297,6 +313,14 @@ impl Nibble {
         window.focus(&input.focus_handle(cx));
         // Follow the system when it switches between light and dark.
         cx.observe_window_appearance(window, |_, _, cx| cx.notify()).detach();
+        // And when it is asked for less motion, which it says no word of.
+        motion::check();
+        cx.observe_window_activation(window, |_, window, _| {
+            if window.is_window_active() {
+                motion::check();
+            }
+        })
+        .detach();
         let fields = FIELDS
             .iter()
             .map(|field| {
@@ -320,6 +344,13 @@ impl Nibble {
             stats: HashMap::new(),
             context: None,
             scroll: ScrollHandle::new(),
+            shown_from: 0,
+            page: 0,
+            dot: Eased::new(gpui::transparent_black()),
+            context_shown: Eased::new(0.),
+            leaving: Vec::new(),
+            dragging: false,
+            overlay_leaving: false,
             running: None,
             attached: Vec::new(),
             attach_error: None,
@@ -446,7 +477,9 @@ impl Nibble {
             return;
         }
         let text = self.input.update(cx, |input, cx| input.take(cx));
-        let files: String = self.attached.drain(..).map(|file| file.block).collect();
+        let leaving = std::mem::take(&mut self.leaving);
+        let files: String =
+            self.attached.drain(..).filter(|file| !leaving.contains(&file.path)).map(|file| file.block).collect();
         self.attach_error = None;
         self.say(&format!("{}{files}", text.trim()), cx);
     }
@@ -462,6 +495,9 @@ impl Nibble {
             .and_then(Value::as_u64)
             .map_or(24_000, |n| n as usize);
         self.attach_error = None;
+        // Files on their way out go now, so they count for nothing.
+        let leaving = std::mem::take(&mut self.leaving);
+        self.attached.retain(|file| !leaving.contains(&file.path));
         for path in paths {
             if self.attached.iter().any(|file| file.path == attach::shown(path)) {
                 continue;
@@ -474,17 +510,36 @@ impl Nibble {
         }
         if self.view == View::Settings {
             self.view = View::Chat;
+            self.page += 1;
         }
         window.focus(&self.input.focus_handle(cx));
         cx.notify();
     }
 
     fn detach(&mut self, n: usize, cx: &mut Context<Self>) {
-        if n < self.attached.len() {
-            self.attached.remove(n);
-        }
         self.attach_error = None;
         cx.notify();
+        let Some(path) = self.attached.get(n).map(|file| file.path.clone()) else { return };
+        if motion::reduced() {
+            self.attached.remove(n);
+            return;
+        }
+        // Fade it out first; until it has gone it no longer counts.
+        if self.leaving.contains(&path) {
+            return;
+        }
+        self.leaving.push(path.clone());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(motion::OUT).await;
+            let _ = this.update(cx, |nibble, cx| {
+                if let Some(at) = nibble.leaving.iter().position(|gone| *gone == path) {
+                    nibble.leaving.remove(at);
+                    nibble.attached.retain(|file| file.path != path);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn say(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -552,6 +607,7 @@ impl Nibble {
                 }
                 if let (Some(used), Some(room)) = (stats["prompt_chars"].as_f64(), stats["input_chars"].as_f64()) {
                     self.context = (room > 0.).then(|| (used / room).min(1.) as f32);
+                    self.context_shown.set(self.context.unwrap_or(0.));
                 }
             }
         }
@@ -593,7 +649,11 @@ impl Nibble {
         self.texts.clear();
         self.stats.clear();
         self.context = None;
+        self.context_shown.reset(0.);
         self.view = View::Chat;
+        // What the chat already holds is there at once; the page fades in.
+        self.shown_from = self.chat.turns.len();
+        self.page += 1;
         self.scroll.scroll_to_bottom();
         window.focus(&self.input.focus_handle(cx));
         cx.notify();
@@ -630,7 +690,12 @@ impl Nibble {
         }
         self.notice = settings::managed()
             .then(|| (false, "This file is managed by Nix, so it can't be changed from here.".to_string()));
-        self.view = View::Settings;
+        if self.view != View::Settings {
+            self.view = View::Settings;
+            self.page += 1;
+        }
+        // Coming back, the turns so far are just there.
+        self.shown_from = self.chat.turns.len();
         self.show_hints(cx);
         self.show_presets(&saved, true, cx);
         // Ask again: the server may have switched models, and with them presets.
@@ -900,22 +965,31 @@ fn stats_line(stats: &Value) -> Option<String> {
 
 /// How full the conversation is: a short bar and a percentage. Ochre when
 /// nearly full, since past that the oldest messages are left out.
-fn context_meter(used: f32, theme: &Theme) -> impl IntoElement {
-    let colour = if used >= 0.85 { theme.ochre } else { theme.blue };
-    div()
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .gap(px(6.))
-        .child(
-            div()
-                .w(px(48.))
-                .h(px(5.))
-                .rounded_full()
-                .bg(theme.box_line.opacity(0.6))
-                .child(div().h_full().rounded_full().w(px(48. * used)).bg(colour)),
-        )
-        .child(SharedString::from(format!("{:.0}% of context", used * 100.)))
+/// It counts up (or down) from the last turn's figure.
+fn context_meter(used: Eased<f32>, theme: &Theme) -> gpui::AnyElement {
+    let (track, blue, ochre) = (theme.box_line.opacity(0.6), theme.blue, theme.ochre);
+    // Figures of one width, so the bar holds still while they count.
+    let figures = gpui::Font { features: gpui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])), ..gpui::font(SANS) };
+    let meter = move |meter: Div, used: f32| {
+        let colour = if used >= 0.85 { ochre } else { blue };
+        meter
+            .child(
+                div()
+                    .w(px(48.))
+                    .h(px(5.))
+                    .rounded_full()
+                    .bg(track)
+                    .child(div().h_full().rounded_full().w(px(48. * used)).bg(colour)),
+            )
+            .child(div().font(figures.clone()).child(SharedString::from(format!("{:.0}% of context", used * 100.))))
+    };
+    let row = div().flex().flex_shrink_0().items_center().gap(px(6.));
+    let Eased { from, to, step } = used;
+    if motion::reduced() || from == to {
+        return meter(row, to).into_any_element();
+    }
+    let animation = Animation::new(motion::CHANGE).with_easing(motion::ease_out);
+    row.with_animation(("context", step), animation, move |row, t| meter(row, from + (to - from) * t)).into_any_element()
 }
 
 fn capital(word: &str) -> String {
@@ -1066,31 +1140,46 @@ impl Nibble {
             )
     }
 
+    /// The status dot's colour, and what the model is doing in words.
+    /// Sage once the model is in memory, ochre while it loads, grey when it
+    /// is not loaded (it loads with the next message) or out of reach.
+    fn dot(&self, theme: &Theme) -> (Hsla, Option<&'static str>) {
+        match self.models.state.as_str() {
+            _ if self.models.current.is_empty() => (theme.box_line, None),
+            "loading" => (theme.ochre, Some("loading…")),
+            "idle" => (theme.box_line, Some("not loaded")),
+            "loaded" => (theme.sage, Some("loaded")),
+            _ => (theme.sage, None),
+        }
+    }
+
     /// The strip along the bottom: the model and whether it is loaded, and
     /// the way to the settings.
     fn status_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let reached = !self.models.current.is_empty();
         let address = self.server.url.trim_start_matches("http://").trim_start_matches("https://").to_string();
         let ink = theme.ink;
-        // Sage once the model is in memory, ochre while it loads, grey when
-        // it is not loaded (it loads with the next message) or out of reach.
-        let (dot, state) = match self.models.state.as_str() {
-            _ if !reached => (theme.box_line, None),
-            "loading" => (theme.ochre, Some("loading…")),
-            "idle" => (theme.box_line, Some("not loaded")),
-            "loaded" => (theme.sage, Some("loaded")),
-            _ => (theme.sage, None),
+        let (_, state) = self.dot(theme);
+        // The dot eases from its last colour to this one.
+        let Eased { from, to, step } = self.dot;
+        let dot = div().size(px(7.)).rounded_full().bg(to);
+        let dot = if motion::reduced() || from == to {
+            dot.into_any_element()
+        } else {
+            dot.with_animation(("dot", step), Animation::new(motion::CHANGE).with_easing(motion::ease_out), move |dot, t| {
+                dot.bg(motion::mix(from, to, t))
+            })
+            .into_any_element()
         };
-        let dot = div().size(px(7.)).rounded_full().bg(dot);
         let dot = if self.models.state == "loading" {
-            dot.with_animation(
+            div().child(dot).with_animation(
                 "loading",
                 Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.3, 1.)),
                 |dot, delta| dot.opacity(delta),
             )
             .into_any_element()
         } else {
-            dot.into_any_element()
+            dot
         };
         div()
             .h(px(28.))
@@ -1119,7 +1208,7 @@ impl Nibble {
                 bar.child(div().min_w_0().truncate().text_color(theme.rose).child(error))
             })
             .child(div().flex_1())
-            .when_some(self.context, |bar, used| bar.child(context_meter(used, theme)))
+            .when(self.context.is_some(), |bar| bar.child(context_meter(self.context_shown, theme)))
             .child(div().flex_shrink_0().child("⌘N new chat"))
             .child(
                 div()
@@ -1144,7 +1233,7 @@ impl Nibble {
         stats: Option<&String>,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Div {
         let parts: Vec<gpui::AnyElement> = turn
             .parts
             .iter()
@@ -1232,7 +1321,7 @@ impl Nibble {
             )
     }
 
-    fn chat_view(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn chat_view(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
         let log = if self.chat.turns.is_empty() {
             // Nothing said yet: a title page.
             div().id("log").flex_1().flex().flex_col().justify_center().child(column(
@@ -1264,6 +1353,8 @@ impl Nibble {
         } else {
             let (texts, count, running) = (&mut self.texts, self.chat.turns.len(), self.running.is_some());
             let (stats, loading) = (&self.stats, self.models.state == "loading");
+            // The page's own fade keeps these ids apart from one chat to the next.
+            let shown_from = self.shown_from;
             let turns: Vec<_> = self
                 .chat
                 .turns
@@ -1271,7 +1362,9 @@ impl Nibble {
                 .enumerate()
                 .map(|(n, turn)| {
                     let waiting = running && n + 1 == count;
-                    Self::turn(texts, n, turn, waiting, loading, stats.get(&n), theme, cx).into_any_element()
+                    let turn = Self::turn(texts, n, turn, waiting, loading, stats.get(&n), theme, cx);
+                    // A turn that comes while the chat is open rises into place.
+                    if n >= shown_from { motion::fade_in(turn, ("turn", n), 8.) } else { turn.into_any_element() }
                 })
                 .collect();
             div()
@@ -1292,7 +1385,7 @@ impl Nibble {
             .iter()
             .enumerate()
             .map(|(n, file)| {
-                chip(&file.path, theme).pr(px(2.)).child(
+                let chip = chip(&file.path, theme).pr(px(2.)).child(
                     div()
                         .id(("detach", n))
                         .size(px(16.))
@@ -1310,7 +1403,15 @@ impl Nibble {
                             nibble.detach(n, cx);
                         }))
                         .child("×"),
-                )
+                );
+                // Not one id for both, or the way out would pick up where the
+                // way in finished.
+                let id = |way: &str| gpui::ElementId::Name(SharedString::from(format!("chip {way} {}", file.path)));
+                if self.leaving.contains(&file.path) {
+                    motion::fade_out(chip, id("out"))
+                } else {
+                    motion::fade_in(chip, id("in"), 0.)
+                }
             })
             .collect();
         let composer = div()
@@ -1460,7 +1561,7 @@ impl Nibble {
             .into_any_element()
     }
 
-    fn settings_view(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn settings_view(&self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
         let file = settings::path().map_or("no config file: HOME is not set".to_string(), |path| path.display().to_string());
         let rows = FIELDS.iter().enumerate().map(|(n, field)| {
             let control = match field.kind {
@@ -1696,10 +1797,30 @@ impl Nibble {
 impl Render for Nibble {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(window);
+        // Each page, and each chat, fades in over the last.
+        let page = ("page", self.page);
         let main = match self.view {
-            View::Chat => self.chat_view(&theme, window, cx).into_any_element(),
-            View::Settings => self.settings_view(&theme, cx).into_any_element(),
+            View::Chat => motion::fade_in(self.chat_view(&theme, window, cx), page, 0.),
+            View::Settings => motion::fade_in(self.settings_view(&theme, cx), page, 0.),
         };
+        let (dot, _) = self.dot(&theme);
+        self.dot.set(dot);
+        // The overlay fades out for a moment once the files are dropped or
+        // taken away again.
+        let dragging = cx.has_active_drag();
+        if self.dragging && !dragging && !motion::reduced() {
+            self.overlay_leaving = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(motion::OUT).await;
+                let _ = this.update(cx, |nibble, cx| {
+                    nibble.overlay_leaving = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        self.overlay_leaving &= !dragging;
+        self.dragging = dragging;
         // After the views, which may have just made some of these.
         let presets = self.presets.iter().map(|(_, input)| input);
         for input in self.fields.iter().chain(presets).chain([&self.input]).chain(self.texts.values()) {
@@ -1726,13 +1847,14 @@ impl Render for Nibble {
             .child(main)
             .child(self.status_bar(&theme, cx))
             // Files from elsewhere are the only thing dragged over the window.
-            .when(cx.has_active_drag(), |root| root.child(Self::drop_here(&theme)))
+            .when(dragging, |root| root.child(motion::fade_in(Self::drop_here(&theme), "drop", 0.)))
+            .when(self.overlay_leaving, |root| root.child(motion::fade_out(Self::drop_here(&theme), "drop-out")))
     }
 }
 
 impl Nibble {
     /// What the window shows while files are dragged over it.
-    fn drop_here(theme: &Theme) -> impl IntoElement {
+    fn drop_here(theme: &Theme) -> Div {
         div().absolute().top_0().left_0().size_full().p_3().child(
             div()
                 .size_full()
