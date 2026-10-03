@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,6 +46,22 @@ const SIGTERM: i32 = 15;
 
 /// The running model server, for the signal handler. 0 means none.
 static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+
+/// Whether the model is in memory, for `GET /info`: a client can show that a
+/// slow first reply is the model loading, not a hang. Kept apart from the
+/// lock on `Backend`, which is held for the whole of a start.
+static MODEL_STATE: AtomicU8 = AtomicU8::new(IDLE);
+const IDLE: u8 = 0;
+const LOADING: u8 = 1;
+const LOADED: u8 = 2;
+
+fn model_state() -> &'static str {
+    match MODEL_STATE.load(Ordering::SeqCst) {
+        LOADING => "loading",
+        LOADED => "loaded",
+        _ => "idle",
+    }
+}
 
 /// Take the model server down with us, so a stopped proxy never leaves a few
 /// GB of weights behind in an orphan.
@@ -125,6 +141,7 @@ fn acquire(config: &Config, state: &Arc<Mutex<Backend>>) -> io::Result<InUse> {
         if child.try_wait()?.is_some() {
             eprintln!("nibble serve: model server exited, starting it again");
             backend.child = None;
+            MODEL_STATE.store(IDLE, Ordering::SeqCst);
         }
     }
     if backend.child.is_none() {
@@ -151,6 +168,7 @@ fn acquire(config: &Config, state: &Arc<Mutex<Backend>>) -> io::Result<InUse> {
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("can't run {}: {e}", config.server)))?;
         CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
+        MODEL_STATE.store(LOADING, Ordering::SeqCst);
         while TcpStream::connect(("127.0.0.1", config.backend_port)).is_err() {
             let failure = match child.try_wait()? {
                 Some(status) => Some(format!("model server stopped during start ({status})")),
@@ -159,6 +177,7 @@ fn acquire(config: &Config, state: &Arc<Mutex<Backend>>) -> io::Result<InUse> {
             };
             if let Some(failure) = failure {
                 CHILD_PID.store(0, Ordering::SeqCst);
+                MODEL_STATE.store(IDLE, Ordering::SeqCst);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(io::Error::other(failure));
@@ -166,6 +185,7 @@ fn acquire(config: &Config, state: &Arc<Mutex<Backend>>) -> io::Result<InUse> {
             thread::sleep(Duration::from_millis(200));
         }
         eprintln!("nibble serve: model server ready after {:.1}s", started.elapsed().as_secs_f32());
+        MODEL_STATE.store(LOADED, Ordering::SeqCst);
         backend.child = Some(child);
     }
     backend.active += 1;
@@ -239,6 +259,7 @@ fn switch(client: &mut TcpStream, request: &web::Request, state: &Mutex<Backend>
         }
         if let Some(mut child) = backend.child.take() {
             CHILD_PID.store(0, Ordering::SeqCst);
+            MODEL_STATE.store(IDLE, Ordering::SeqCst);
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -248,14 +269,15 @@ fn switch(client: &mut TcpStream, request: &web::Request, state: &Mutex<Backend>
     web::respond(client, "200 OK", "application/json", info(true).to_string().as_bytes())
 }
 
-/// What `GET /info` says: the model, the others to choose from, and more.
+/// What `GET /info` says: the model, whether it is loaded, the others to
+/// choose from, and more.
 /// With `settings`, which only a client with the token gets, also the
 /// settings really in use: after the model's presets, with the defaults that
 /// depend on how the server was started filled in. Never the token.
 pub fn info(settings: bool) -> Value {
     let config = crate::config::get();
     let models: Vec<String> = models().into_iter().map(|(name, _)| name).collect();
-    let mut info = json!({ "model": config.model_name, "models": models, "tools": web::tools_allowed(), "version": env!("CARGO_PKG_VERSION") });
+    let mut info = json!({ "model": config.model_name, "state": model_state(), "models": models, "tools": web::tools_allowed(), "version": env!("CARGO_PKG_VERSION") });
     if settings {
         let mut in_use = config.to_json();
         let in_use = in_use.as_object_mut().expect("settings are an object");
@@ -395,6 +417,7 @@ fn stop_if_idle(config: &Config, state: &Mutex<Backend>) {
         if let Some(mut child) = backend.child.take() {
             eprintln!("nibble serve: idle, stopping model server");
             CHILD_PID.store(0, Ordering::SeqCst);
+            MODEL_STATE.store(IDLE, Ordering::SeqCst);
             let _ = child.kill();
             let _ = child.wait();
         }

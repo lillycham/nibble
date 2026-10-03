@@ -176,6 +176,24 @@ impl Stats {
             _ => None,
         };
     }
+
+    /// The same, as numbers, for a client that sets its own line (the
+    /// window). A count the server didn't give is left out.
+    pub fn to_json(&self) -> Value {
+        let mut stats = json!({
+            "prompt_chars": self.prompt_chars,
+            "requests": self.requests,
+            "waiting_ms": self.waiting.as_millis() as u64,
+            "writing_ms": self.writing.as_millis() as u64,
+        });
+        if let Some(tokens) = self.prompt_tokens {
+            stats["prompt_tokens"] = tokens.into();
+        }
+        if let Some(tokens) = self.reply_tokens {
+            stats["reply_tokens"] = tokens.into();
+        }
+        stats
+    }
 }
 
 impl fmt::Display for Stats {
@@ -421,10 +439,14 @@ mod tests {
             stats.to_string(),
             "prompt 500 tokens, reply 60 tokens at 30.0 tokens/s, 0.5 s to the first token, 2.5 s in all over 2 requests"
         );
+        assert_eq!(stats.to_json()["prompt_tokens"], 500);
+        assert_eq!(stats.to_json()["reply_tokens"], 60);
+        assert_eq!(stats.to_json()["writing_ms"], 2000);
 
         // A server that reports no counts: characters instead, and no speed.
         let mut stats = Stats { requests: 1, prompt_chars: 900, ..Stats::default() };
         stats.count(&Value::Null);
         assert_eq!(stats.to_string(), "prompt 900 characters, 0.0 s to the first token, 0.0 s in all");
+        assert_eq!(stats.to_json(), json!({ "prompt_chars": 900, "requests": 1, "waiting_ms": 0, "writing_ms": 0 }));
     }
 }

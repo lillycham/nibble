@@ -81,6 +81,11 @@
   holds the server, the model list and Settings. Choices on the settings
   page are segmented controls. It builds and runs on Linux too, which is how
   it was checked (under Xvfb).
+- The window's status bar says whether the model is loaded, loading or not
+  loaded (`GET /info` has `state`), and while it loads the turn says
+  "Loading the model…" in place of "Thinking…". Under each reply is the
+  stats line the command line prints; `/chat` sends the numbers with its
+  `done` event. Stats are not saved with the chat.
 
 ## Roadmap
 
@@ -115,9 +120,6 @@ and `-f FILE`.
   block). Selecting across blocks would need one text element for the whole
   reply; until then, Copy takes all of it.
 - An app icon.
-- Model state in the status bar: idle, loading or loaded. A cold start is the
-  slow part, and today it looks like a hang.
-- Stats line per turn in the window, as the command line has.
 - Attach files by dragging them into the window, as `-f FILE` does on the
   command line.
 - Settings page: a field per model preset, and masking for the token.
