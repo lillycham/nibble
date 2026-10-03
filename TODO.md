@@ -64,6 +64,11 @@
   with the newest, `-r ID` with any, and `nibble chats` lists them. A one-shot
   prompt is saved only when it continues a chat. Tool results are not kept, so
   a resumed chat carries the questions and answers only.
+- `GET /info` with the token adds `settings`: what `nibble serve` really uses,
+  after the model's presets and the command-line flags, with `model_dir` and
+  `roots` worked out. Never the token or `url`. The window's settings page
+  shows these in its empty fields ("in use: 6") in place of the default hints,
+  and asks again each time it opens, so a model switch shows its presets.
 
 ## Next
 
@@ -83,10 +88,6 @@
 
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
 - In the window's settings page: a field per model preset, and masking for the token.
-- Settings page: fill each empty field with the value really in use, not a
-  grey hint that repeats a default written into the GUI. The server knows its
-  effective settings (model, roots, limits, presets applied), so it should
-  report them, for example from `/info`, and the page should show those.
 - Write and shell tools behind `--write` and `--shell`.
 - Quote-your-evidence mode: the model quotes the lines behind its answer, and
   nibble checks that each quote appears in the file. Flags invented answers.
