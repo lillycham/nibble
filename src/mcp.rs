@@ -220,7 +220,19 @@ fn map(args: &Value) -> Result<Report, Report> {
     Ok(Report { status: "ok", notes: vec![note], answer: lines.join("\n") })
 }
 
+/// Claude starts this server once and keeps it, while `nibble serve` may
+/// switch models in the meantime. So look again before anything that depends
+/// on the model's presets. A bad config file keeps the settings we have.
+fn refresh_config() {
+    match config::refresh() {
+        Ok(Some(model)) => eprintln!("nibble mcp: the model is now {model}; its presets apply"),
+        Ok(None) => {}
+        Err(e) => eprintln!("nibble mcp: keeping the old settings: {e}"),
+    }
+}
+
 fn call_tool(params: &Value) -> Value {
+    refresh_config();
     let name = params["name"].as_str().unwrap_or_default();
     let args = &params["arguments"];
     eprintln!("nibble mcp: {name} {args}");
@@ -301,7 +313,10 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
                 let outcome = match request["method"].as_str().unwrap_or_default() {
                     "initialize" => Ok(initialize(&request["params"])),
                     "ping" => Ok(json!({})),
-                    "tools/list" => Ok(json!({ "tools": tool_list() })),
+                    "tools/list" => {
+                        refresh_config();
+                        Ok(json!({ "tools": tool_list() }))
+                    }
                     "tools/call" => Ok(call_tool(&request["params"])),
                     method => Err((-32601, format!("method not found: {method}"))),
                 };
