@@ -173,14 +173,16 @@ and `-f FILE`.
   server that takes images (mlx-vlm's), behind `nibble serve` like the other.
   Detection can come first. LFM2.5-2.6B is text-only; Liquid's vision
   models are LFM2-VL.
-- Animations: short eases in and out where the window now jumps. Candidates:
-  a new message or reply fading and sliding in, the settings page and chat
-  tabs crossfading, the drop overlay and file chips fading in and out, the
-  status dot easing between colours, and the context figure counting up.
-  Reuse the approach of the loading dot in the status bar
-  (`with_animation` with an easing function). Keep them subtle and quick
-  (about 150 to 250 ms), never in the way of typing or a streaming reply,
-  and off when the system asks for reduced motion.
+- Animations (done, `gui/src/motion.rs`): a new turn fades and rises in, the
+  settings page and each chat fade in, chat tabs grow in and shrink out,
+  the drop overlay and file chips fade in and out, the status dot eases
+  between colours and the context figure counts to its new value, in 150
+  to 250 ms. Off when the system asks for
+  reduced motion (`reduceMotion` on macOS, GNOME's `enable-animations`
+  elsewhere), read at launch and when the window comes to the front; the
+  loading dot still pulses. Left to check on macOS: that setting, and how
+  they feel at full speed. The drop overlay has not been seen fading, as
+  Xvfb has no file drags.
 
 ### 4. Release 0.1
 
