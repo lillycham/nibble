@@ -1,0 +1,18 @@
+# Copy this to ~/.config/lighthouse/watch.toml and edit it.
+
+# How often to check, in seconds. This example checks every two minutes;
+# leave it out to get the default.
+interval = 120
+
+[[target]]
+name = "blog"
+url = "https://example.org/"
+
+[[target]]
+name = "api"
+url = "https://api.example.org/health"
+timeout = 3
+
+[notify]
+backend = "ntfy"
+topic = "lighthouse-alerts"

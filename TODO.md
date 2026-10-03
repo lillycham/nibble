@@ -90,6 +90,14 @@
 - An app icon: a paper tile with a bite out of one corner and a slab "n" in
   the window's slate blue. Drawn in `gui/icon/nibble.svg`; Nix turns it into
   the bundle's `nibble.icns`.
+- `nibble eval`: 20 questions with known answers about a small sample
+  project (`eval/`, built into the binary and written to a temporary
+  directory for each run). Each question is a fresh conversation with the
+  usual prompt and file tools, `ask_claude` off. Reports right answers, tool
+  calls and time per question and per model; the first request loads the
+  model and is not timed. `--model NAME` (repeatable) switches `nibble serve`
+  to each model in turn, with its presets, and back at the end. An answer is
+  right when it holds every expected term as a whole word or number.
 
 ## Roadmap
 
@@ -101,9 +109,8 @@ settings in use on the settings page.
 
 The presets so far rest on a few questions asked by hand. Measure instead.
 
-- `nibble eval`: a small fixture project in the repo, about 20 questions with
-  known answers. Reports correct answers, tool calls and time per model, so a
-  new model or preset gets a fair trial in one command.
+- Done: `nibble eval` (see Done). Next is to run it on the models we have
+  and record the results under "Other models and servers".
 - The eval measures whether quote-your-evidence mode (done, `-q`) helps.
 
 ### 3. The window as the main interface

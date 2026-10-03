@@ -89,6 +89,12 @@ entry in `model_dir`, which defaults to the directory that holds `model`. The
 switch applies from the next message, and each model's presets come with it.
 A restart of `nibble serve` goes back to `model`.
 
+## Trying a model
+
+`nibble eval` asks the model 20 questions about a small sample project and
+reports how many it got right, how many tool calls it made and how long it
+took. `--model NAME`, repeated, compares several models from the list.
+
 ## Reach
 
 `nibble serve` listens on this machine only. To listen on another address, set

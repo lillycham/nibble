@@ -1,5 +1,6 @@
 mod chat;
 mod config;
+mod eval;
 mod mcp;
 mod quotes;
 mod serve;
@@ -26,6 +27,7 @@ use sessions::{Recorder, Session};
 const USAGE: &str = "usage: nibble [options] [PROMPT...]
        nibble serve --model PATH [options]
        nibble mcp [--root DIR]...
+       nibble eval [--model NAME]...
        nibble config
        nibble chats
 
@@ -55,7 +57,8 @@ it continues a chat.
 
 The model can read and search files but can't change anything.
 
-`nibble config` prints the settings in use and where the config file belongs.";
+`nibble config` prints the settings in use and where the config file belongs.
+`nibble eval` tries the model on a set of questions with known answers.";
 
 struct Args {
     system: String,
@@ -267,6 +270,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     match argv.peek().map(String::as_str) {
         Some("serve") => return serve::run(argv.skip(1)),
         Some("mcp") => return mcp::run(argv.skip(1)),
+        Some("eval") => return eval::run(argv.skip(1)),
         Some("config") => {
             show_config();
             return Ok(());
