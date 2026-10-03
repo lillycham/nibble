@@ -956,7 +956,6 @@ impl Nibble {
     }
 
     fn chat_view(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let model = if self.models.current.is_empty() { "A small local model" } else { self.models.current.as_str() };
         let log = if self.chat.turns.is_empty() {
             // Nothing said yet: a title page.
             div().id("log").flex_1().flex().flex_col().justify_center().child(column(
@@ -973,21 +972,17 @@ impl Nibble {
                             .font_weight(gpui::FontWeight::BOLD)
                             .child("nibble"),
                     )
-                    .child(
-                        div()
-                            .font_family(SERIF)
-                            .text_size(px(18.))
-                            .line_height(px(24.))
-                            .text_color(theme.muted)
-                            .child("Ask something small."),
-                    )
-                    .child(
-                        div()
-                            .pt_2()
-                            .text_size(px(12.5))
-                            .text_color(theme.muted)
-                            .child(SharedString::from(format!("{model} answers, through nibble serve."))),
-                    ),
+                    // The model loaded, once the server has said.
+                    .when(!self.models.current.is_empty(), |page| {
+                        page.child(
+                            div()
+                                .font_family(SERIF)
+                                .text_size(px(18.))
+                                .line_height(px(24.))
+                                .text_color(theme.muted)
+                                .child(SharedString::from(self.models.current.clone())),
+                        )
+                    }),
             ))
         } else {
             let (texts, count, running) = (&mut self.texts, self.chat.turns.len(), self.running.is_some());
