@@ -50,6 +50,10 @@
 - `nibble mcp` asks `nibble serve` for its model before each `tools/list` and
   `tools/call`, and loads that model's presets when it has changed, so a switch
   needs no restart. `NIBBLE_MODEL` pins it.
+- Stats line per turn on the command line: prompt size, reply tokens, speed and
+  time to the first token, on stderr. On when stderr is a terminal; `--stats`
+  and `--no-stats` override. Token counts need a server that honours
+  `stream_options.include_usage`; without them it gives the prompt in characters.
 
 ## Next
 
@@ -67,7 +71,6 @@
 
 ## Later
 
-- Stats line per turn: prompt size, tokens, speed.
 - `-f FILE` to attach files without a tool round.
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
 - Sessions for the command line: save and resume chats (the window has them).

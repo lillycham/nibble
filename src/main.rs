@@ -33,6 +33,8 @@ With no prompt and no pipe, nibble starts a chat.
       --tools           let it read files even when input is piped in
       --no-claude       don't let the model ask Claude for help
       --anywhere        let the model read files outside the current directory
+      --stats           after each answer, show its prompt size, tokens and speed
+      --no-stats        don't (the default when stderr is not a terminal)
 
 The model can read and search files but can't change anything.
 
@@ -43,6 +45,7 @@ struct Args {
     max_tokens: u32,
     prompt: String,
     tools: Vec<Value>,
+    stats: bool,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Option<Args>, Box<dyn Error>> {
@@ -51,6 +54,7 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
     // Piped input is the whole task, so the model gets no tools with it: an
     // eager model otherwise goes looking for files, and the schemas cost tokens.
     let (mut tools, mut claude, mut confined) = (config::get().tools && !piped, tools::claude_allowed(), true);
+    let mut stats = io::stderr().is_terminal();
     let mut words = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -61,6 +65,8 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
             "--tools" => tools = true,
             "--no-claude" => claude = false,
             "--anywhere" => confined = false,
+            "--stats" => stats = true,
+            "--no-stats" => stats = false,
             _ => words.push(arg),
         }
     }
@@ -81,7 +87,7 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
         system
     });
     let tools = if tools { tools::schemas(claude) } else { Vec::new() };
-    Ok(Some(Args { system, max_tokens, prompt: words.join(" "), tools }))
+    Ok(Some(Args { system, max_tokens, prompt: words.join(" "), tools, stats }))
 }
 
 fn repl(args: &Args) -> Result<(), Box<dyn Error>> {
@@ -99,11 +105,20 @@ fn repl(args: &Args) -> Result<(), Box<dyn Error>> {
         }
         let before = messages.len();
         messages.push(message("user", line.trim()));
-        if let Err(e) = chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default()) {
-            eprintln!("nibble: {e}");
-            messages.truncate(before);
+        match chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default()) {
+            Ok(outcome) => show_stats(args, &outcome),
+            Err(e) => {
+                eprintln!("nibble: {e}");
+                messages.truncate(before);
+            }
         }
         chat::trim(&mut messages);
+    }
+}
+
+fn show_stats(args: &Args, outcome: &chat::Outcome) {
+    if args.stats {
+        eprintln!("nibble: {}", outcome.stats);
     }
 }
 
@@ -181,7 +196,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         (false, false) => format!("{}\n\n<input>\n{input}\n</input>", args.prompt),
     };
     let mut messages = vec![message("system", &args.system), message("user", &user)];
-    chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default())?;
+    let outcome = chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default())?;
+    show_stats(&args, &outcome);
     Ok(())
 }
 
