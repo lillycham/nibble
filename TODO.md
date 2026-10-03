@@ -42,6 +42,11 @@
   `POST /model` changes to one of them (never to a path the client names).
   It refuses while a reply is in progress. The window and the page have a list.
   The switch is not kept: a restart goes back to `model`.
+- `/v1/` requests through `nibble serve` are pinned to the model it runs: the
+  body's `"model"` is replaced, so a client with the token can't make
+  mlx_lm.server load another one (from Hugging Face or anywhere). Each
+  connection carries one request, and chunked bodies are refused, so nothing
+  passes unchecked.
 
 ## Next
 
@@ -61,9 +66,6 @@
 
 - `nibble mcp` reads the model's presets once, when it starts. After a model
   switch it keeps the old model's presets until Claude restarts it.
-- A remote client with the token can still name any model in a `/v1/` request
-  body, and mlx_lm.server loads it, even from Hugging Face. Pin the model in
-  requests that `serve` passes on.
 
 - Stats line per turn: prompt size, tokens, speed.
 - `-f FILE` to attach files without a tool round.

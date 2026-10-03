@@ -265,6 +265,17 @@ fn handle(mut client: TcpStream, config: &Config, state: &Arc<Mutex<Backend>>) -
     if !request.path.starts_with("/v1/") {
         return web::route(&mut client, &request);
     }
+    if has_header(request.head(), "transfer-encoding") {
+        return web::respond(&mut client, "411 Length Required", "text/plain", b"nibble serve: send a Content-Length\n");
+    }
+    if request.content_length() > MAX_API_BODY {
+        return web::respond(&mut client, "413 Payload Too Large", "text/plain", b"nibble serve: request body too large\n");
+    }
+    if has_header(request.head(), "expect") {
+        // The client waits for this before it sends the body we need to read.
+        client.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+    }
+    let body = request.body_within(&mut client, MAX_API_BODY)?;
     let _in_use = match acquire(config, state) {
         Ok(in_use) => in_use,
         Err(e) => {
@@ -273,16 +284,69 @@ fn handle(mut client: TcpStream, config: &Config, state: &Arc<Mutex<Backend>>) -
             return web::respond(&mut client, "503 Service Unavailable", "text/plain", body.as_bytes());
         }
     };
-    let mut server = TcpStream::connect(("127.0.0.1", config.backend_port))?;
-    // Pass on what we read while deciding where the request belongs.
-    server.write_all(&request.raw)?;
-    let upload = {
-        let (client, server) = (client.try_clone()?, server.try_clone()?);
-        thread::spawn(move || pipe(client, server))
+    // While we count as active the model can't be switched, so this is the
+    // model the server runs for the whole request.
+    let model = state.lock().unwrap().model.clone();
+    let forwarded = match pin_model(request.head(), &body, &model) {
+        Ok(forwarded) => forwarded,
+        Err(e) => return web::respond(&mut client, "400 Bad Request", "text/plain", format!("nibble serve: {e}\n").as_bytes()),
     };
+    let mut server = TcpStream::connect(("127.0.0.1", config.backend_port))?;
+    server.write_all(&forwarded)?;
+    // Nothing more goes to the server from this client: a second request on
+    // the same connection would pass by unchecked. The forwarded request asks
+    // the server to close when it has answered.
+    let _ = server.shutdown(Shutdown::Write);
     pipe(server, client);
-    let _ = upload.join();
     Ok(())
+}
+
+/// Requests for the model API may be at most this big. More than the chat
+/// page's limit, because a client with a long context sends all of it.
+const MAX_API_BODY: usize = 32 << 20;
+
+/// Whether the head has a header of this name (in lower case).
+fn has_header(head: &[u8], name: &str) -> bool {
+    String::from_utf8_lossy(head)
+        .split("\r\n")
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .any(|(header, _)| header.trim().eq_ignore_ascii_case(name))
+}
+
+/// The request to pass on to the model server, with the body's "model" set to
+/// the one we run. A client with the token could otherwise name any model,
+/// and mlx_lm.server would load it, even from Hugging Face. A request with
+/// no body (`GET /v1/models`) goes as it is. The connection closes after the
+/// answer, so each request comes through here.
+fn pin_model(head: &[u8], body: &[u8], model: &str) -> Result<Vec<u8>, String> {
+    let body = if body.is_empty() {
+        Vec::new()
+    } else {
+        let mut json: Value = serde_json::from_slice(body).map_err(|e| format!("bad JSON: {e}"))?;
+        let object = json.as_object_mut().ok_or("the body must be a JSON object")?;
+        object.insert("model".into(), model.into());
+        json.to_string().into_bytes()
+    };
+    let head = String::from_utf8_lossy(head);
+    let mut lines = head.split("\r\n").filter(|line| !line.is_empty());
+    let mut out = String::from(lines.next().unwrap_or_default());
+    out += "\r\n";
+    for line in lines {
+        let name = line.split_once(':').map_or(line, |(name, _)| name).trim().to_ascii_lowercase();
+        // Ours to set, or answered here already.
+        if !matches!(name.as_str(), "content-length" | "connection" | "keep-alive" | "expect" | "transfer-encoding") {
+            out += line;
+            out += "\r\n";
+        }
+    }
+    if !body.is_empty() {
+        out += &format!("Content-Length: {}\r\n", body.len());
+    }
+    out += "Connection: close\r\n\r\n";
+    let mut out = out.into_bytes();
+    out.extend_from_slice(&body);
+    Ok(out)
 }
 
 fn reap_when_idle(config: &Config, state: &Mutex<Backend>) {
@@ -365,4 +429,113 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    const MODEL: &str = "/models/Qwen3-4B";
+
+    fn split(request: &[u8]) -> (String, Value) {
+        let end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let head = String::from_utf8(request[..end].to_vec()).unwrap();
+        let body = if request.len() > end { serde_json::from_slice(&request[end..]).unwrap() } else { Value::Null };
+        (head, body)
+    }
+
+    #[test]
+    fn requests_name_only_the_model_we_run() {
+        let head = b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\n\
+                     Content-Length: 99\r\nConnection: keep-alive\r\nExpect: 100-continue\r\n\r\n";
+        let body = br#"{"model":"mlx-community/some-other-model","messages":[]}"#;
+        let (head, body) = split(&pin_model(head, body, MODEL).unwrap());
+        assert_eq!(body["model"], MODEL);
+        assert_eq!(body["messages"], json!([]));
+        assert!(head.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+        assert!(head.contains("Authorization: Bearer t\r\n"));
+        assert!(head.contains(&format!("Content-Length: {}\r\n", body.to_string().len())));
+        assert!(head.contains("Connection: close\r\n"));
+        assert!(!head.contains("99") && !head.contains("keep-alive") && !head.contains("Expect"));
+
+        // A body that names no model gets ours too.
+        let (_, body) = split(&pin_model(b"POST /v1/completions HTTP/1.1\r\n\r\n", br#"{"prompt":"hi"}"#, MODEL).unwrap());
+        assert_eq!(body["model"], MODEL);
+
+        // No body: nothing to pin.
+        let (head, body) = split(&pin_model(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n", b"", MODEL).unwrap());
+        assert_eq!(head, "GET /v1/models HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(body, Value::Null);
+
+        // A body we can't pin goes nowhere.
+        let head = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n";
+        assert!(pin_model(head, b"not json", MODEL).is_err());
+        assert!(pin_model(head, br#"["model"]"#, MODEL).is_err());
+    }
+
+    #[test]
+    fn headers_are_found_by_name_in_any_case() {
+        let head = b"POST /v1/x HTTP/1.1\r\nTRANSFER-ENCODING: chunked\r\n\r\n";
+        assert!(has_header(head, "transfer-encoding"));
+        assert!(!has_header(head, "expect"));
+        assert!(!has_header(b"POST /transfer-encoding: HTTP/1.1\r\n\r\n", "transfer-encoding"));
+    }
+
+    /// The whole path: a client asks for another model over a kept-alive
+    /// connection, and the model server sees only ours, and only once.
+    #[test]
+    fn the_proxy_pins_the_model_and_closes_after_one_request() {
+        let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = Config {
+            model: MODEL.into(),
+            listen: String::new(),
+            backend_port: backend.local_addr().unwrap().port(),
+            idle: Duration::from_secs(60),
+            server: String::new(),
+            server_args: Vec::new(),
+        };
+        // Stands in for a running model server, so `acquire` starts nothing.
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let state = Arc::new(Mutex::new(Backend {
+            model: MODEL.into(),
+            child: Some(child),
+            active: 0,
+            last_used: Instant::now(),
+        }));
+
+        let seen = thread::spawn(move || {
+            let (mut server, _) = backend.accept().unwrap();
+            let mut seen = Vec::new();
+            server.read_to_end(&mut seen).unwrap();
+            server.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+            seen
+        });
+
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(front.local_addr().unwrap()).unwrap();
+        let body = r#"{"model":"mlx-community/whatever-4bit","messages":[]}"#;
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+            body.len()
+        );
+        client.write_all(format!("{request}{request}").as_bytes()).unwrap();
+        let (accepted, _) = front.accept().unwrap();
+        handle(accepted, &config, &state).unwrap();
+
+        let mut answer = String::new();
+        client.read_to_string(&mut answer).unwrap();
+        assert!(answer.ends_with("\r\n\r\nok"), "{answer}");
+        let seen = seen.join().unwrap();
+        let (head, body) = split(&seen);
+        assert_eq!(body["model"], MODEL);
+        assert_eq!(head.matches("POST").count(), 1);
+        assert!(!String::from_utf8_lossy(&seen).contains("whatever"));
+        assert_eq!(state.lock().unwrap().active, 0);
+
+        let mut child = state.lock().unwrap().child.take().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
