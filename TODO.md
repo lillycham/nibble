@@ -69,6 +69,10 @@
   `roots` worked out. Never the token or `url`. The window's settings page
   shows these in its empty fields ("in use: 6") in place of the default hints,
   and asks again each time it opens, so a model switch shows its presets.
+- The settings page has a field per model preset: the `models` section's
+  entries, then each model on the list that none of them covers, typed as
+  `prompt: light, max_calls: 6`. An empty one shows the built-in preset. The
+  token field shows dots and can't be copied from; emptying it removes the token.
 - The window's input wraps and grows to ten lines, then scrolls. Return sends;
   Shift-Return (or Option- or Control-Return) starts a new line, and Up and
   Down move by row. Settings fields wrap a long value onto up to four lines.
@@ -133,7 +137,6 @@ and `-f FILE`.
 - Stats line per turn in the window, as the command line has.
 - Attach files by dragging them into the window, as `-f FILE` does on the
   command line.
-- Settings page: a field per model preset, and masking for the token.
 
 ### 4. Release 0.1
 

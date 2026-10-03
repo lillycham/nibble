@@ -98,7 +98,13 @@ struct Layout {
     lines: Vec<(usize, WrappedLine)>,
     line_height: Pixels,
     origin: Point<Pixels>,
+    /// For a masked field, the text behind the dots that were drawn. Offsets
+    /// in and out of the layout are offsets in that text, not in the dots.
+    masked: Option<SharedString>,
 }
+
+/// What a masked field draws in place of each character.
+const MASK: char = '•';
 
 impl Layout {
     fn height(&self) -> Pixels {
@@ -107,6 +113,10 @@ impl Layout {
 
     /// The top left of the character at `offset`, from the top left of the text.
     fn position_for(&self, offset: usize) -> Point<Pixels> {
+        let offset = match &self.masked {
+            Some(text) => text[..offset.min(text.len())].chars().count() * MASK.len_utf8(),
+            None => offset,
+        };
         let mut top = px(0.);
         for (n, (start, line)) in self.lines.iter().enumerate() {
             let last = n + 1 == self.lines.len();
@@ -122,6 +132,15 @@ impl Layout {
 
     /// The offset nearest to `position`, which is from the top left of the text.
     fn index_for(&self, position: Point<Pixels>) -> usize {
+        let index = self.drawn_index_for(position);
+        match &self.masked {
+            Some(text) => text.char_indices().nth(index / MASK.len_utf8()).map_or(text.len(), |(at, _)| at),
+            None => index,
+        }
+    }
+
+    /// The same, as an offset in what was drawn.
+    fn drawn_index_for(&self, position: Point<Pixels>) -> usize {
         if position.y < px(0.) {
             return 0;
         }
@@ -153,6 +172,8 @@ pub struct TextInput {
     max_lines: Option<usize>,
     /// Text to select and copy, but not to change.
     read_only: bool,
+    /// Drawn as dots, and never copied, for a secret.
+    masked: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -242,6 +263,7 @@ impl TextInput {
             newlines: false,
             max_lines: Some(4),
             read_only: false,
+            masked: false,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -266,6 +288,12 @@ impl TextInput {
     /// Text that can be selected and copied, but not changed, as tall as it is.
     pub fn read_only(cx: &mut Context<Self>) -> Self {
         TextInput { newlines: true, max_lines: None, read_only: true, ..Self::new("", cx) }
+    }
+
+    /// A single-value field that shows a dot for each character, as a
+    /// password field does.
+    pub fn masked(placeholder: &str, cx: &mut Context<Self>) -> Self {
+        TextInput { masked: true, ..Self::new(placeholder, cx) }
     }
 
     pub fn text(&self) -> String {
@@ -556,14 +584,14 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
         }
     }
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() && !self.read_only {
+        if !self.selected_range.is_empty() && !self.read_only && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -702,6 +730,8 @@ impl TextInput {
     fn display(&self, style: &gpui::TextStyle) -> (SharedString, Vec<TextRun>) {
         let (display_text, text_color) = if self.content.is_empty() {
             (self.placeholder.clone(), self.dim)
+        } else if self.masked {
+            (MASK.to_string().repeat(self.content.chars().count()).into(), style.color)
         } else {
             (self.content.clone(), style.color)
         };
@@ -714,7 +744,8 @@ impl TextInput {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = self.marked_range.as_ref() {
+        // Composed text is underlined where it is, which dots would give away.
+        let runs = if let Some(marked_range) = self.marked_range.as_ref().filter(|_| !self.masked) {
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -960,6 +991,7 @@ impl Element for TextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let accent = input.accent;
+        let masked = (input.masked && !input.content.is_empty()).then(|| input.content.clone());
         let style = window.text_style();
         let (text, runs) = input.display(&style);
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -978,7 +1010,7 @@ impl Element for TextElement {
                 (at, line)
             })
             .collect();
-        let mut layout = Layout { lines, line_height, origin: bounds.origin };
+        let mut layout = Layout { lines, line_height, origin: bounds.origin, masked };
 
         // Scroll so that the cursor is in view, if it has moved.
         let max_scroll = (layout.height() - bounds.size.height).max(px(0.));

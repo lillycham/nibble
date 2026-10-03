@@ -265,6 +265,9 @@ struct Nibble {
     choices: Vec<String>,
     /// What an empty field shows: the value the server uses, or a hint.
     hints: Vec<String>,
+    /// A field per model preset: the name it is found by, and the settings
+    /// typed for it.
+    presets: Vec<(String, Entity<TextInput>)>,
     notice: Option<(bool, String)>,
 }
 
@@ -274,7 +277,15 @@ impl Nibble {
         window.focus(&input.focus_handle(cx));
         // Follow the system when it switches between light and dark.
         cx.observe_window_appearance(window, |_, _, cx| cx.notify()).detach();
-        let fields = FIELDS.iter().map(|field| cx.new(|cx| TextInput::new(field.hint, cx))).collect();
+        let fields = FIELDS
+            .iter()
+            .map(|field| {
+                cx.new(|cx| match field.kind {
+                    Kind::Secret => TextInput::masked(field.hint, cx),
+                    _ => TextInput::new(field.hint, cx),
+                })
+            })
+            .collect();
         let mut nibble = Nibble {
             server: Server::load(),
             models: Models::default(),
@@ -292,6 +303,7 @@ impl Nibble {
             fields,
             choices: vec![String::new(); FIELDS.len()],
             hints: FIELDS.iter().map(|field| field.hint.to_string()).collect(),
+            presets: Vec::new(),
             notice: None,
         };
         nibble.find_model(cx);
@@ -319,6 +331,8 @@ impl Nibble {
                     }
                     if nibble.view == View::Settings {
                         nibble.show_hints(cx);
+                        // A model may have turned up that has no field yet.
+                        nibble.show_presets(&settings::load(), false, cx);
                     }
                     nibble.trace();
                     cx.notify();
@@ -499,6 +513,7 @@ impl Nibble {
             .then(|| (false, "This file is managed by Nix, so it can't be changed from here.".to_string()));
         self.view = View::Settings;
         self.show_hints(cx);
+        self.show_presets(&saved, true, cx);
         // Ask again: the server may have switched models, and with them presets.
         self.find_model(cx);
         cx.notify();
@@ -510,11 +525,42 @@ impl Nibble {
         let saved = settings::load();
         for (n, field) in FIELDS.iter().enumerate() {
             let hint = match field.kind {
-                Kind::Secret if saved.contains_key(field.key) => "set; type to replace it".to_string(),
+                Kind::Secret if saved.get("token_file").is_some_and(|file| file != "") => {
+                    "not set here: it is read from the token file".to_string()
+                }
                 _ => settings::in_use(field, &self.models.in_use).unwrap_or_else(|| field.hint.to_string()),
             };
             self.fields[n].update(cx, |input, _| input.set_placeholder(&hint));
             self.hints[n] = hint;
+        }
+        cx.notify();
+    }
+
+    /// A field for each model preset: the file's own, then each model on the
+    /// list that none of them covers. `fill` puts the file's values in the
+    /// fields; without it, fields already there keep what has been typed.
+    fn show_presets(&mut self, saved: &Map<String, Value>, fill: bool, cx: &mut Context<Self>) {
+        let mut old = std::mem::take(&mut self.presets);
+        for name in settings::preset_names(saved, &self.models.all) {
+            let shown = settings::show_preset(&name, saved);
+            let input = match old.iter().position(|(had, _)| *had == name) {
+                Some(at) => {
+                    let (_, input) = old.remove(at);
+                    if fill {
+                        input.update(cx, |input, cx| input.set_text(&shown, cx));
+                    }
+                    input
+                }
+                None => {
+                    let hint = settings::preset_hint(&name);
+                    cx.new(|cx| {
+                        let mut input = TextInput::new(&hint, cx);
+                        input.set_text(&shown, cx);
+                        input
+                    })
+                }
+            };
+            self.presets.push((name, input));
         }
         cx.notify();
     }
@@ -530,8 +576,15 @@ impl Nibble {
             };
             outcome = outcome.and(settings::apply(field, &typed, &mut saved));
         }
+        let presets: Vec<(String, String)> =
+            self.presets.iter().map(|(name, input)| (name.clone(), input.read(cx).text())).collect();
+        outcome = outcome.and_then(|()| settings::apply_presets(&presets, &mut saved));
         self.notice = Some(match outcome.and_then(|()| settings::save(&saved)) {
-            Ok(()) => (false, "Saved. Restart nibble serve for the server's own settings to take effect.".to_string()),
+            Ok(()) => {
+                // Tidy the fields into the form they are kept in.
+                self.show_presets(&saved, true, cx);
+                (false, "Saved. Some settings take effect when the server next starts.".to_string())
+            }
             Err(error) => (true, error),
         });
         // The address and token are ours too, so use them at once.
@@ -1217,6 +1270,56 @@ impl Nibble {
                 .child(control)
         });
 
+        // A row for each model preset, with a tag on the one that applies now.
+        let current = self.models.current.to_lowercase();
+        let presets = self.presets.iter().enumerate().map(|(n, (name, input))| {
+            let loaded = !current.is_empty() && current.contains(&name.to_lowercase());
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .px_5()
+                .py_3()
+                .when(n > 0, |row| row.border_t_1().border_color(theme.panel_line))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(SharedString::from(name.clone())),
+                        )
+                        .when(loaded, |label| {
+                            label.child(
+                                div()
+                                    .px(px(6.))
+                                    .rounded(px(4.))
+                                    .bg(theme.sage.opacity(0.18))
+                                    .text_color(theme.sage)
+                                    .text_size(px(11.))
+                                    .child("loaded"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(8.))
+                        .bg(theme.card)
+                        .border_1()
+                        .border_color(theme.box_line)
+                        .font_family(MONO)
+                        .text_size(px(12.5))
+                        .child(input.clone()),
+                )
+        });
+        let has_presets = !self.presets.is_empty();
+
         let about = if settings::load().is_empty() {
             "There is no config file yet, so everything is at its default. Each field shows that default in grey; \
              fill in only what you want to change. These settings are shared with the nibble command."
@@ -1266,6 +1369,37 @@ impl Nibble {
                         .bg(theme.panel)
                         .children(rows),
                 )
+                .when(has_presets, |page| {
+                    page.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .pt_2()
+                            .child(
+                                div()
+                                    .font_family(SERIF)
+                                    .text_size(px(20.))
+                                    .line_height(px(26.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("Per model"),
+                            )
+                            .child(div().text_color(theme.muted).child(
+                                "Each applies while a model whose name contains it is loaded, and wins over the \
+                                 settings above. Write them as name: value, with commas between.",
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .rounded(px(12.))
+                            .border_1()
+                            .border_color(theme.panel_line)
+                            .bg(theme.panel)
+                            .children(presets),
+                    )
+                })
                 .child(
                     div()
                         .flex()
@@ -1307,7 +1441,8 @@ impl Render for Nibble {
             View::Settings => self.settings_view(&theme, cx).into_any_element(),
         };
         // After the views, which may have just made some of these.
-        for input in self.fields.iter().chain([&self.input]).chain(self.texts.values()) {
+        let presets = self.presets.iter().map(|(_, input)| input);
+        for input in self.fields.iter().chain(presets).chain([&self.input]).chain(self.texts.values()) {
             input.update(cx, |input, _| {
                 input.dim = theme.muted;
                 input.accent = theme.blue;
