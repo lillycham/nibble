@@ -81,6 +81,12 @@
   holds the server, the model list and Settings. Choices on the settings
   page are segmented controls. It builds and runs on Linux too, which is how
   it was checked (under Xvfb).
+- Files dropped on the window go whole with the next message, as `-f FILE`
+  does: each shows as a chip that can be taken off, and a folder, a binary
+  file or one over `input_chars` is refused with a line saying why. A chat
+  with files sends `"tools": false`, which `POST /chat` now honours, so it
+  gets no file tools, again as with `-f`. Sent messages show the files by
+  name, and chats saved by `nibble -f` show the same way.
 
 ## Roadmap
 
@@ -118,8 +124,6 @@ and `-f FILE`.
 - Model state in the status bar: idle, loading or loaded. A cold start is the
   slow part, and today it looks like a hang.
 - Stats line per turn in the window, as the command line has.
-- Attach files by dragging them into the window, as `-f FILE` does on the
-  command line.
 - Settings page: a field per model preset, and masking for the token.
 
 ### 4. Release 0.1

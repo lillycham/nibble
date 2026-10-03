@@ -157,7 +157,9 @@ fn chat_turn(client: &mut TcpStream, request: &Request) -> io::Result<()> {
         Ok(body) => body,
         Err(e) => return respond(client, "400 Bad Request", "text/plain", format!("bad JSON: {e}\n").as_bytes()),
     };
-    let use_tools = tools_allowed();
+    // A client turns them off for a chat with files attached, as `-f` does:
+    // the files are the whole task.
+    let use_tools = tools_allowed() && body["tools"].as_bool() != Some(false);
     // No ask_claude here: a remote chat should not be able to spend Claude
     // usage on this machine.
     let tools = if use_tools { tools::schemas(false) } else { Vec::new() };

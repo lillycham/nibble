@@ -2,6 +2,7 @@
 //! talks to `nibble serve` over the same `/chat` endpoint as the web page.
 //! It does keep the chats, as files, and it can edit nibble's config file.
 
+mod attach;
 mod input;
 mod settings;
 mod store;
@@ -17,12 +18,13 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    App, Application, Bounds, Context, Div, Entity, Focusable, Hsla, KeyBinding, ScrollHandle, SharedString,
+    App, Application, Bounds, Context, Div, Entity, ExternalPaths, Focusable, Hsla, KeyBinding, ScrollHandle, SharedString,
     Stateful, TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div,
     point, prelude::*, px, rgb, size,
 };
 use serde_json::{Map, Value, json};
 
+use attach::Attached;
 use input::TextInput;
 use settings::{FIELDS, Kind};
 use store::{Chat, Entry, Part, Turn};
@@ -255,6 +257,10 @@ struct Nibble {
     scroll: ScrollHandle,
     /// Set while a reply is arriving. Raising the flag stops it.
     running: Option<Arc<AtomicBool>>,
+    /// Files dropped on the window, to go with the next message, and why
+    /// the last one dropped could not.
+    attached: Vec<Attached>,
+    attach_error: Option<String>,
     /// Goes up whenever the open chat changes, so a reply that is still
     /// arriving for the old one is dropped instead of landing in the new one.
     epoch: usize,
@@ -288,6 +294,8 @@ impl Nibble {
             chats: store::list(),
             scroll: ScrollHandle::new(),
             running: None,
+            attached: Vec::new(),
+            attach_error: None,
             epoch: 0,
             fields,
             choices: vec![String::new(); FIELDS.len()],
@@ -366,8 +374,49 @@ impl Nibble {
             cx.notify();
             return;
         }
+        if self.input.read(cx).text().trim().is_empty() {
+            return;
+        }
         let text = self.input.update(cx, |input, cx| input.take(cx));
-        self.say(text.trim(), cx);
+        let files: String = self.attached.drain(..).map(|file| file.block).collect();
+        self.attach_error = None;
+        self.say(&format!("{}{files}", text.trim()), cx);
+    }
+
+    /// Attach files dropped on the window to the next message, each whole,
+    /// as long as they fit in what the server keeps of a conversation.
+    fn attach(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let budget = self
+            .models
+            .in_use
+            .get("input_chars")
+            .or(settings::load().get("input_chars"))
+            .and_then(Value::as_u64)
+            .map_or(24_000, |n| n as usize);
+        self.attach_error = None;
+        for path in paths {
+            if self.attached.iter().any(|file| file.path == attach::shown(path)) {
+                continue;
+            }
+            let used: usize = self.attached.iter().map(|file| file.block.len()).sum();
+            match attach::read(path, budget.saturating_sub(used)) {
+                Ok(file) => self.attached.push(file),
+                Err(error) => self.attach_error = Some(error),
+            }
+        }
+        if self.view == View::Settings {
+            self.view = View::Chat;
+        }
+        window.focus(&self.input.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn detach(&mut self, n: usize, cx: &mut Context<Self>) {
+        if n < self.attached.len() {
+            self.attached.remove(n);
+        }
+        self.attach_error = None;
+        cx.notify();
     }
 
     fn say(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -384,6 +433,12 @@ impl Nibble {
         }
         messages.push(json!({ "role": "user", "content": text }));
         self.chat.turns.push(Turn { user: text.to_string(), parts: Vec::new() });
+        // Attached files are the whole task, so a chat with any gets no file
+        // tools, as with `nibble -f`: an eager model goes looking otherwise.
+        let mut body = json!({ "messages": messages });
+        if self.chat.turns.iter().any(|turn| !attach::split(&turn.user).1.is_empty()) {
+            body["tools"] = json!(false);
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         self.running = Some(stop.clone());
@@ -391,7 +446,7 @@ impl Nibble {
         let (send, mut receive) = mpsc::unbounded();
         let server = self.server.clone();
         std::thread::spawn(move || {
-            if let Err(error) = ask(&server, &json!({ "messages": messages }), &stop, &send) {
+            if let Err(error) = ask(&server, &body, &stop, &send) {
                 let _ = send.unbounded_send(Event::Error(error));
             }
         });
@@ -724,6 +779,26 @@ fn link(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, theme: &
         .child(label.into())
 }
 
+/// A file that goes with a message, by name.
+fn chip(path: &str, theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .max_w(px(240.))
+        .h(px(22.))
+        .px_2()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.box_line)
+        .bg(theme.box_fill)
+        .font_family(MONO)
+        .text_size(px(11.5))
+        .text_color(theme.ink_soft)
+        .child(div().min_w_0().truncate().child(SharedString::from(attach::name(path).to_string())))
+}
+
 /// Centre the content of a pane in a column of readable width.
 fn column(content: impl IntoElement) -> Div {
     div().w_full().flex().flex_col().items_center().child(div().w_full().max_w(px(COLUMN)).child(content))
@@ -913,6 +988,9 @@ impl Nibble {
             })
             .collect();
 
+        // The files that went with the message show by name, not whole.
+        let (asked, files) = attach::split(&turn.user);
+        let files: Vec<Div> = files.into_iter().map(|path| chip(path, theme)).collect();
         let answer = turn.answer();
         // The whole reply at once, code blocks and all.
         let copy = (!waiting && !answer.trim().is_empty()).then(|| {
@@ -940,9 +1018,10 @@ impl Nibble {
                             .font_family(SERIF)
                             .text_size(px(17.))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .child(selectable(texts, (n, usize::MAX, 0), &turn.user, cx)),
+                            .child(selectable(texts, (n, usize::MAX, 0), asked, cx)),
                     ),
             )
+            .when(!files.is_empty(), |turn| turn.child(div().pl(px(20.)).flex().flex_wrap().gap_1().children(files)))
             .child(
                 div()
                     .pl(px(20.))
@@ -1005,6 +1084,33 @@ impl Nibble {
         let running = self.running.is_some();
         let ready = running || !self.input.read(cx).text().trim().is_empty();
         let (blue, blue_fill) = (theme.blue, theme.blue_fill);
+        let (muted, ink) = (theme.muted, theme.ink);
+        let files: Vec<_> = self
+            .attached
+            .iter()
+            .enumerate()
+            .map(|(n, file)| {
+                chip(&file.path, theme).pr(px(2.)).child(
+                    div()
+                        .id(("detach", n))
+                        .size(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .font_family(SANS)
+                        .text_size(px(13.))
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(move |style| style.text_color(ink))
+                        .on_click(cx.listener(move |nibble, _, _, cx| {
+                            cx.stop_propagation();
+                            nibble.detach(n, cx);
+                        }))
+                        .child("×"),
+                )
+            })
+            .collect();
         let composer = div()
             .id("composer")
             .flex()
@@ -1025,6 +1131,7 @@ impl Nibble {
             }])
             .cursor_text()
             .on_click(cx.listener(|nibble, _, window, cx| window.focus(&nibble.input.focus_handle(cx))))
+            .when(!files.is_empty(), |composer| composer.child(div().pl(px(20.)).flex().flex_wrap().gap_1().children(files)))
             .child(
                 div()
                     .flex()
@@ -1041,7 +1148,11 @@ impl Nibble {
                     .pl(px(20.))
                     .text_size(px(11.5))
                     .text_color(theme.muted)
-                    .child(if running { "↩ stops the reply" } else { "↩ sends · ⇧↩ starts a new line" })
+                    .child(match (running, &self.attach_error) {
+                        (true, _) => div().child("↩ stops the reply"),
+                        (false, Some(error)) => div().min_w_0().truncate().text_color(theme.rose).child(SharedString::from(error.clone())),
+                        (false, None) => div().child("↩ sends · ⇧↩ starts a new line · drop files to attach"),
+                    })
                     .child(div().flex_1())
                     .child(
                         div()
@@ -1318,6 +1429,8 @@ impl Render for Nibble {
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::open_settings))
+            .on_drop(cx.listener(|nibble, paths: &ExternalPaths, window, cx| nibble.attach(paths.paths(), window, cx)))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -1328,6 +1441,36 @@ impl Render for Nibble {
             .child(self.tabs(&theme, cx))
             .child(main)
             .child(self.status_bar(&theme, cx))
+            // Files from elsewhere are the only thing dragged over the window.
+            .when(cx.has_active_drag(), |root| root.child(Self::drop_here(&theme)))
+    }
+}
+
+impl Nibble {
+    /// What the window shows while files are dragged over it.
+    fn drop_here(theme: &Theme) -> impl IntoElement {
+        div().absolute().top_0().left_0().size_full().p_3().child(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .rounded(px(12.))
+                .border_2()
+                .border_color(theme.blue.opacity(0.7))
+                .bg(theme.blue_fill.opacity(0.92))
+                .child(
+                    div()
+                        .font_family(SERIF)
+                        .text_size(px(22.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme.blue)
+                        .child("Drop to attach"),
+                )
+                .child(div().text_size(px(12.5)).text_color(theme.muted).child("Each file goes whole with your next message.")),
+        )
     }
 }
 
