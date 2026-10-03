@@ -126,13 +126,16 @@ impl Args {
     }
 
     /// The settings for one turn of `recipe`.
-    fn with(&self, recipe: &Recipe) -> Args {
+    fn with(&self, recipe: &Recipe) -> Result<Args, String> {
         let mut args = self.clone();
         if recipe.tools == Some(false) {
             // Plugins were asked for by name, so they stay.
             args.tools.clone_from(&args.plugin_tools);
             args.file_tools = false;
         }
+        let more = plugins::start(&recipe.plugins)?;
+        plugins::add(&mut args.plugin_tools, more.clone());
+        plugins::add(&mut args.tools, more);
         if let Some(max_tokens) = recipe.max_tokens {
             args.max_tokens = max_tokens;
         }
@@ -142,7 +145,7 @@ impl Args {
         if recipe.quote && args.quotes.is_none() {
             args.quotes = Some(args.sources());
         }
-        args
+        Ok(args)
     }
 }
 
@@ -161,7 +164,7 @@ fn parse_args(
     let mut files = String::new();
     let mut attached = Vec::new();
     let mut quote = recipe.is_some_and(|recipe| recipe.quote);
-    let mut plugins = Vec::new();
+    let mut plugins = recipe.map(|recipe| recipe.plugins.clone()).unwrap_or_default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
@@ -212,8 +215,9 @@ fn parse_args(
     let file_tools = tools;
     let mut tools = if tools { tools::schemas(claude) } else { Vec::new() };
     // Asked for by name, so offered even with piped input or attached files.
-    let plugin_tools = plugins::start(&plugins)?;
-    tools.extend(plugin_tools.iter().cloned());
+    let mut plugin_tools = Vec::new();
+    plugins::add(&mut plugin_tools, plugins::start(&plugins)?);
+    plugins::add(&mut tools, plugin_tools.clone());
     let mut args = Args {
         system,
         max_tokens,
@@ -294,12 +298,13 @@ struct Repl {
     files: String,
 }
 
-const COMMANDS: [(&str, &str); 6] = [
+const COMMANDS: [(&str, &str); 7] = [
     ("/new", "start a new chat; this one stays saved"),
     ("/clear", "start over, and forget this chat"),
     ("/model [NAME]", "list the models, or switch to one"),
     ("/settings", "show the settings in use"),
     ("/quote [on|off]", "have answers quote the lines they rest on, and check them"),
+    ("/plugin NAME", "offer a plugin's tools in this chat; /plugin off NAME stops"),
     ("/help", "this list"),
 ];
 
@@ -329,6 +334,42 @@ impl Repl {
         }
         self.messages[0] = message("system", &self.args.system());
         chat::trim(&mut self.messages);
+    }
+
+    /// `/plugin NAME` adds a plugin's tools to this chat, `/plugin off NAME`
+    /// takes them away, and `/plugin` alone says which there are.
+    fn plugin(&mut self, text: &str) -> Result<(), Box<dyn Error>> {
+        let on = |args: &Args, name: &str| {
+            let names = plugins::tool_names(name);
+            !names.is_empty() && args.tools.iter().any(|t| t["function"]["name"].as_str().is_some_and(|n| names.iter().any(|m| m == n)))
+        };
+        match text.split_whitespace().collect::<Vec<_>>()[..] {
+            [] => {
+                let all = plugins::configured();
+                if all.is_empty() {
+                    eprintln!("nibble: no plugins are set up; `nibble plugins` says how");
+                }
+                for (name, _) in all {
+                    eprintln!("  {name:<18}{}", if on(&self.args, &name) { "on" } else { "off" });
+                }
+            }
+            ["off", name] => {
+                let names = plugins::tool_names(name);
+                let theirs = |t: &Value| t["function"]["name"].as_str().is_some_and(|n| names.iter().any(|m| m == n));
+                self.args.tools.retain(|t| !theirs(t));
+                self.args.plugin_tools.retain(|t| !theirs(t));
+                eprintln!("nibble: {name} off");
+            }
+            [name] => {
+                let schemas = plugins::start(&[name.to_string()])?;
+                let count = schemas.len();
+                plugins::add(&mut self.args.plugin_tools, schemas.clone());
+                plugins::add(&mut self.args.tools, schemas);
+                eprintln!("nibble: {name} on, with {count} tool{}", if count == 1 { "" } else { "s" });
+            }
+            _ => return Err("/plugin takes a name, or off and a name".into()),
+        }
+        Ok(())
     }
 
     fn start_over(&mut self) {
@@ -361,9 +402,10 @@ impl Repl {
                 self.messages[0] = message("system", &self.args.system());
                 eprintln!("nibble: {}", if on { "answers quote their evidence" } else { "quotes off" });
             }
+            "plugin" => self.plugin(text)?,
             _ => {
                 let recipe = config::get().recipe(name).ok_or_else(|| format!("no command /{name}; /help lists them"))?;
-                let mut args = self.args.with(recipe);
+                let mut args = self.args.with(recipe)?;
                 // The text given, else the attached files alone, else the command's output.
                 let input = match recipe.run_command().filter(|_| text.is_empty() && self.files.is_empty()) {
                     Some(output) => output?,

@@ -195,10 +195,10 @@ and `-f FILE`.
 - Plugins. Decided: a plugin is an MCP server (stdio, tools only), so existing
   servers work. Declared under "plugins" in the config file, off unless a chat
   asks for it, because each tool schema costs tokens on every request. Done on
-  the command line (`--plugin NAME`, `nibble plugins`). Still to do: a
-  "plugins" list on recipes, `/plugin NAME` in the chat REPL, and the window,
-  which needs a `plugins` field on `POST /chat` and a say on which plugins a
-  web chat may use.
+  the command line: `--plugin NAME`, `nibble plugins`, `/plugin NAME` in the
+  chat, and a "plugins" list on recipes. Still to do: the window, which needs
+  a `plugins` field on `POST /chat` and a say on which plugins a web chat may
+  use. Until then a recipe run from the window gets no plugin tools.
 
 ### 6. Reach
 

@@ -287,6 +287,22 @@ pub fn start(names: &[String]) -> Result<Vec<Value>, String> {
     Ok(schemas)
 }
 
+/// Add `more` to `tools`, leaving out any already there.
+pub fn add(tools: &mut Vec<Value>, more: Vec<Value>) {
+    for schema in more {
+        if !tools.iter().any(|had| had["function"]["name"] == schema["function"]["name"]) {
+            tools.push(schema);
+        }
+    }
+}
+
+/// The names the model knows a running plugin's tools by.
+pub fn tool_names(name: &str) -> Vec<String> {
+    let running = RUNNING.lock().unwrap();
+    let Some(at) = running.servers.iter().position(|server| server.name == name) else { return Vec::new() };
+    running.tools.iter().filter(|tool| tool.server == at).map(|tool| tool.offered.clone()).collect()
+}
+
 /// The text of a tool result. Pictures and other things a text model can't
 /// use are named, not sent.
 fn result_text(result: &Value) -> String {

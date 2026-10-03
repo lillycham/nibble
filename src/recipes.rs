@@ -9,8 +9,10 @@ use serde_json::{json, Map, Value};
 
 /// Names a recipe may not take: the built-in slash commands, and the
 /// command line's own subcommands, which `nibble NAME` would shadow.
-pub const RESERVED: [&str; 13] =
-    ["help", "new", "clear", "model", "settings", "quote", "serve", "mcp", "eval", "config", "chats", "recipes", "plugins"];
+pub const RESERVED: [&str; 14] = [
+    "help", "new", "clear", "model", "settings", "quote", "plugin", "serve", "mcp", "eval", "config", "chats", "recipes",
+    "plugins",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recipe {
@@ -32,6 +34,9 @@ pub struct Recipe {
     /// text: its output is the input. Only on the command line and in the
     /// chat there, which run in a directory; the window asks for the text.
     pub command: Vec<String>,
+    /// Plugins whose tools this recipe offers, by name. Only on the command
+    /// line and in the chat there, for now.
+    pub plugins: Vec<String>,
 }
 
 /// Built in, so that the two the plan names exist from the start. The config
@@ -99,8 +104,15 @@ fn parse(name: &str, value: &Value) -> Result<Recipe, String> {
             .filter(|args| !args.is_empty())
             .ok_or("\"command\" must be a list of text: the program, then its arguments")?,
     };
+    let plugins = match object.get("plugins") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .and_then(|names| names.iter().map(|name| name.as_str().map(str::to_string)).collect::<Option<Vec<_>>>())
+            .ok_or("\"plugins\" must be a list of plugin names")?,
+    };
     for key in object.keys() {
-        if !["description", "prompt", "system", "max_tokens", "tools", "quote", "command"].contains(&key.as_str()) {
+        if !["description", "prompt", "system", "max_tokens", "tools", "quote", "command", "plugins"].contains(&key.as_str()) {
             return Err(format!("unknown setting \"{key}\""));
         }
     }
@@ -113,6 +125,7 @@ fn parse(name: &str, value: &Value) -> Result<Recipe, String> {
         tools: flag("tools")?,
         quote: flag("quote")?.unwrap_or(false),
         command,
+        plugins,
     })
 }
 
@@ -162,6 +175,9 @@ impl Recipe {
         }
         if !self.command.is_empty() {
             object.insert("command".into(), json!(self.command));
+        }
+        if !self.plugins.is_empty() {
+            object.insert("plugins".into(), json!(self.plugins));
         }
         Value::Object(object)
     }

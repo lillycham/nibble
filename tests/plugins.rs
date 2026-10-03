@@ -150,6 +150,21 @@ fn a_plugin_is_offered_only_when_asked_for() {
     assert!(listed.starts_with("loud: 2 tools, "), "{listed}");
     assert!(listed.contains("shout, loud_search"), "{listed}");
 
+    // A recipe can bring plugins with it.
+    let config = json!({
+        "plugins": { "loud": { "command": ["sh", "-c", PLUGIN], "tools": ["shout"] } },
+        "recipes": { "loudly": { "prompt": "say {input}", "tools": false, "plugins": ["loud"] } },
+    });
+    fs::write(base.join("config.json"), config.to_string()).unwrap();
+    seen.lock().unwrap().clear();
+    let out = nibble(&base, &url, &["loudly", "hi"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "the plugin said HI");
+    let first = seen.lock().unwrap()[0].clone();
+    assert_eq!(first["tools"], json!([{ "type": "function", "function": {
+        "name": "shout", "description": "Say it loud",
+        "parameters": { "type": "object", "properties": { "text": { "type": "string" } } } } }]));
+
     // A mistake in the config file shows at once.
     fs::write(base.join("config.json"), r#"{ "plugins": { "loud": { "command": "sh" } } }"#).unwrap();
     let out = nibble(&base, &url, &["--no-save", "say", "hi"]);

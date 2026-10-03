@@ -133,7 +133,8 @@ took. `--model NAME`, repeated, compares several models from the list.
 
 A plugin is an MCP server, so the ones already written for other tools work
 here too. Set one up in the config file, and it stays off until a chat asks for
-it with `--plugin NAME` (or `-p`):
+it: `--plugin NAME` (or `-p`), `/plugin NAME` in the chat, or a recipe that
+lists it under `"plugins"`:
 
 ```json
 {
