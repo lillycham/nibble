@@ -8,6 +8,7 @@ command-line program is about 1 MB with two dependencies.
 ```bash
 git diff | nibble "Write a commit message for this diff."
 nibble "Which nixpkgs branch does the flake use?"
+nibble -f flake.nix "What does this flake build?"
 nibble            # a chat
 ```
 
