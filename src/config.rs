@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::RwLock;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 pub struct Config {
     /// Where the model server (or `nibble serve`) listens.
@@ -61,6 +61,9 @@ pub struct Config {
     pub token: String,
     /// A file that holds the token, for setups where the config file is public.
     pub token_file: String,
+    /// MCP servers whose tools a chat may ask for, by name. Each is checked
+    /// when the config is read. None is used unless a chat asks for it.
+    pub plugins: Map<String, Value>,
 }
 
 impl Default for Config {
@@ -91,6 +94,7 @@ impl Default for Config {
             server_args: Vec::new(),
             token: String::new(),
             token_file: String::new(),
+            plugins: Map::new(),
         }
     }
 }
@@ -138,6 +142,14 @@ impl Config {
             "server_args" => list(value).map(|v| self.server_args = v),
             "token" => text(value).map(|v| self.token = v),
             "token_file" => text(value).map(|v| self.token_file = v),
+            "plugins" => {
+                let plugins = value.as_object().ok_or("\"plugins\" must be an object")?;
+                for (name, plugin) in plugins {
+                    crate::plugins::parse(name, plugin)?;
+                }
+                self.plugins = plugins.clone();
+                Some(())
+            }
             // A typo should be loud, not a setting that quietly does nothing.
             _ => return Err(format!("unknown setting \"{key}\"")),
         };
@@ -171,6 +183,7 @@ impl Config {
             // Never print the secret itself.
             "token": if self.token.is_empty() { "" } else { "(set)" },
             "token_file": self.token_file,
+            "plugins": self.plugins,
         })
     }
 }
