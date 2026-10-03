@@ -285,6 +285,12 @@ struct Nibble {
     /// whether the overlay is fading out now that they no longer are.
     dragging: bool,
     overlay_leaving: bool,
+    /// The tabs at the last look, by chat id and title, so that the ones
+    /// added since grow in and the ones gone shrink out (from where they
+    /// were). None before the first look, when all of them are just there.
+    tabs_shown: Option<Vec<(String, SharedString)>>,
+    tabs_new: Vec<String>,
+    tabs_gone: Vec<(usize, String, SharedString)>,
     /// Set while a reply is arriving. Raising the flag stops it.
     running: Option<Arc<AtomicBool>>,
     /// Files dropped on the window, to go with the next message, and why
@@ -351,6 +357,9 @@ impl Nibble {
             leaving: Vec::new(),
             dragging: false,
             overlay_leaving: false,
+            tabs_shown: None,
+            tabs_new: Vec::new(),
+            tabs_gone: Vec::new(),
             running: None,
             attached: Vec::new(),
             attach_error: None,
@@ -1037,9 +1046,18 @@ fn column(content: impl IntoElement) -> Div {
 impl Nibble {
     /// The strip along the top: room for the window's own buttons, then a tab
     /// for each saved chat, newest first, and one for a new chat.
-    fn tabs(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let on_chat = self.view == View::Chat;
         let unsaved = !self.chats.iter().any(|entry| entry.id == self.chat.id);
+        // A new chat's tab keeps its chat's id once saved, so it doesn't
+        // grow in a second time when it gets its title.
+        let mut now: Vec<(String, SharedString)> = Vec::new();
+        if unsaved {
+            now.push((self.chat.id.clone(), "New chat".into()));
+        }
+        now.extend(self.chats.iter().map(|entry| (entry.id.clone(), SharedString::from(entry.title.clone()))));
+        self.ease_tabs(&now, cx);
+
         let tab = |id: gpui::ElementId, title: SharedString, current: bool| {
             let (hover, ground, line) = (theme.ink, theme.ground, theme.panel_line);
             div()
@@ -1064,15 +1082,16 @@ impl Nibble {
                 .child(div().min_w_0().truncate().child(title))
         };
 
-        let mut tabs: Vec<gpui::AnyElement> = Vec::new();
+        let mut tabs: Vec<(String, Stateful<Div>)> = Vec::new();
         if unsaved {
-            tabs.push(tab("tab-new".into(), "New chat".into(), on_chat).pr_3().into_any_element());
+            tabs.push((self.chat.id.clone(), tab("tab-new".into(), "New chat".into(), on_chat).pr_3()));
         }
         for (n, entry) in self.chats.iter().enumerate() {
             let (open_id, delete_id) = (entry.id.clone(), entry.id.clone());
             let current = on_chat && entry.id == self.chat.id;
             let (muted, ink, fill) = (theme.muted, theme.ink, theme.box_fill);
-            tabs.push(
+            tabs.push((
+                entry.id.clone(),
                 tab(("tab", n).into(), SharedString::from(entry.title.clone()), current)
                     .on_click(cx.listener(move |nibble, _, window, cx| nibble.open_chat(&open_id, window, cx)))
                     .child(
@@ -1094,9 +1113,33 @@ impl Nibble {
                                 nibble.delete_chat(&delete_id, window, cx);
                             }))
                             .child("×"),
-                    )
-                    .into_any_element(),
-            );
+                    ),
+            ));
+        }
+        let mut tabs: Vec<gpui::AnyElement> = tabs
+            .into_iter()
+            .map(|(id, tab)| {
+                if !self.tabs_new.contains(&id) || motion::reduced() {
+                    return tab.into_any_element();
+                }
+                let animation = Animation::new(motion::IN).with_easing(motion::ease_out);
+                tab.overflow_hidden()
+                    .with_animation(gpui::ElementId::Name(format!("tab in {id}").into()), animation, |tab, t| {
+                        tab.max_w(px(200. * t)).opacity(t)
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        // Closed tabs shrink out where they were.
+        for (at, id, title) in &self.tabs_gone {
+            let animation = Animation::new(motion::OUT).with_easing(motion::ease_out);
+            let gone = tab(gpui::ElementId::Name(format!("tab gone {id}").into()), title.clone(), false)
+                .pr_3()
+                .overflow_hidden()
+                .with_animation(gpui::ElementId::Name(format!("tab out {id}").into()), animation, |tab, t| {
+                    tab.max_w(px(200. * (1. - t))).pl(px(12. * (1. - t))).pr(px(12. * (1. - t))).opacity(1. - t)
+                });
+            tabs.insert((*at).min(tabs.len()), gone.into_any_element());
         }
 
         let (hover, ink) = (theme.box_fill, theme.ink);
@@ -1150,6 +1193,37 @@ impl Nibble {
             "idle" => (theme.box_line, Some("not loaded")),
             "loaded" => (theme.sage, Some("loaded")),
             _ => (theme.sage, None),
+        }
+    }
+
+    /// Note the tabs added and closed since the last look.
+    fn ease_tabs(&mut self, now: &[(String, SharedString)], cx: &mut Context<Self>) {
+        let Some(before) = self.tabs_shown.replace(now.to_vec()) else { return };
+        let is_in = |list: &[(String, SharedString)], id: &str| list.iter().any(|(other, _)| other == id);
+        for (id, _) in now {
+            if !is_in(&before, id) && !self.tabs_new.contains(id) {
+                self.tabs_new.push(id.clone());
+                self.tabs_gone.retain(|(_, gone, _)| gone != id);
+            }
+        }
+        self.tabs_new.retain(|id| is_in(now, id));
+        if motion::reduced() {
+            return;
+        }
+        for (at, (id, title)) in before.into_iter().enumerate() {
+            if is_in(now, &id) {
+                continue;
+            }
+            self.tabs_new.retain(|new| *new != id);
+            self.tabs_gone.push((at, id.clone(), title));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(motion::OUT).await;
+                let _ = this.update(cx, |nibble, cx| {
+                    nibble.tabs_gone.retain(|(_, gone, _)| *gone != id);
+                    cx.notify();
+                });
+            })
+            .detach();
         }
     }
 

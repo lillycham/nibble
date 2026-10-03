@@ -153,8 +153,8 @@ and `-f FILE`.
   Detection can come first. LFM2.5-2.6B is text-only; Liquid's vision
   models are LFM2-VL.
 - Animations (done, `gui/src/motion.rs`): a new turn fades and rises in, the
-  settings page and each chat fade in, the drop overlay and file chips fade
-  in and out, the status dot eases between colours and the context figure
+  settings page and each chat fade in, chat tabs grow in and shrink out,
+  the drop overlay and file chips fade in and out, the status dot eases between colours and the context figure
   counts to its new value, in 150 to 250 ms. Off when the system asks for
   reduced motion (`reduceMotion` on macOS, GNOME's `enable-animations`
   elsewhere), read at launch and when the window comes to the front; the
