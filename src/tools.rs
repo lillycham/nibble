@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
-use crate::config;
+use crate::{config, plugins};
 
 const MAX_MATCHES: usize = 40;
 const MAX_ENTRIES: usize = 200;
@@ -70,7 +70,10 @@ pub fn call(name: &str, args: &Value) -> String {
         "list_dir" => list_dir(args),
         "search" => search(args),
         "ask_claude" => ask_claude(args),
-        _ => Err(format!("there is no tool called {name}")),
+        _ => match plugins::call(name, args) {
+            Some(result) => return result,
+            None => Err(format!("there is no tool called {name}")),
+        },
     };
     result.unwrap_or_else(|e| {
         if !e.contains("No such file") {

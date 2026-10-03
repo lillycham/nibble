@@ -2,6 +2,7 @@ mod chat;
 mod config;
 mod eval;
 mod mcp;
+mod plugins;
 mod quotes;
 mod serve;
 mod sessions;
@@ -30,6 +31,7 @@ const USAGE: &str = "usage: nibble [options] [PROMPT...]
        nibble eval [--model NAME]...
        nibble config
        nibble chats
+       nibble plugins
 
 Text piped on stdin is given to the model as input for the prompt.
 With no prompt and no pipe, nibble starts a chat, which is saved as it goes.
@@ -43,6 +45,8 @@ With no prompt and no pipe, nibble starts a chat, which is saved as it goes.
       --tools           let it read files even when input is piped in or
                         files are attached
       --no-claude       don't let the model ask Claude for help
+  -p, --plugin NAME     offer the model a plugin's tools too; repeat for more.
+                        Plugins are set up in the config file
   -q, --quote           have the model quote the lines its answer rests on,
                         and check that each quote is really in the file
       --anywhere        let the model read files outside the current directory
@@ -55,9 +59,10 @@ With no prompt and no pipe, nibble starts a chat, which is saved as it goes.
 Saved chats are shared with the window. A one-shot prompt is saved only when
 it continues a chat.
 
-The model can read and search files but can't change anything.
+On its own, the model can read and search files but can't change anything.
 
 `nibble config` prints the settings in use and where the config file belongs.
+`nibble plugins` lists the plugins that are set up, and what each one costs.
 `nibble eval` tries the model on a set of questions with known answers.";
 
 struct Args {
@@ -89,6 +94,7 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
     let mut files = String::new();
     let mut attached = Vec::new();
     let mut quote = false;
+    let mut plugins = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
@@ -105,6 +111,7 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
             "--no-tools" => tools = Some(false),
             "--tools" => tools = Some(true),
             "--no-claude" => claude = false,
+            "-p" | "--plugin" => plugins.push(args.next().ok_or("--plugin needs a name")?),
             "-q" | "--quote" => quote = true,
             "--anywhere" => confined = false,
             "--stats" => stats = true,
@@ -145,7 +152,9 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
     } else {
         (system, None)
     };
-    let tools = if tools { tools::schemas(claude) } else { Vec::new() };
+    let mut tools = if tools { tools::schemas(claude) } else { Vec::new() };
+    // Asked for by name, so offered even with piped input or attached files.
+    tools.extend(plugins::start(&plugins)?);
     Ok(Some(Args { system, max_tokens, prompt: words.join(" "), files, tools, stats, resume, save, quotes }))
 }
 
@@ -279,6 +288,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             sessions::show_list();
             return Ok(());
         }
+        Some("plugins") => {
+            plugins::show();
+            return Ok(());
+        }
         _ => {}
     }
     let input = piped_input()?;
@@ -326,7 +339,9 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let result = run();
+    plugins::stop_all();
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("nibble: {e}");
