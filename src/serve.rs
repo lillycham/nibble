@@ -352,14 +352,18 @@ fn pin_model(head: &[u8], body: &[u8], model: &str) -> Result<Vec<u8>, String> {
 fn reap_when_idle(config: &Config, state: &Mutex<Backend>) {
     loop {
         thread::sleep(Duration::from_secs(5).min(config.idle.max(Duration::from_secs(1))));
-        let mut backend = state.lock().unwrap();
-        if backend.active == 0 && backend.last_used.elapsed() >= config.idle {
-            if let Some(mut child) = backend.child.take() {
-                eprintln!("nibble serve: idle, stopping model server");
-                CHILD_PID.store(0, Ordering::SeqCst);
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        stop_if_idle(config, state);
+    }
+}
+
+fn stop_if_idle(config: &Config, state: &Mutex<Backend>) {
+    let mut backend = state.lock().unwrap();
+    if backend.active == 0 && backend.last_used.elapsed() >= config.idle {
+        if let Some(mut child) = backend.child.take() {
+            eprintln!("nibble serve: idle, stopping model server");
+            CHILD_PID.store(0, Ordering::SeqCst);
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -435,7 +439,6 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
     use std::io::Read;
-    use std::net::TcpListener;
 
     const MODEL: &str = "/models/Qwen3-4B";
 
@@ -537,5 +540,238 @@ mod tests {
         let mut child = state.lock().unwrap().child.take().unwrap();
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+
+    fn config(server: &str, server_args: &[&str]) -> Config {
+        Config {
+            model: "test-model".into(),
+            listen: "127.0.0.1:0".into(),
+            backend_port: free_port(),
+            idle: Duration::ZERO,
+            server: server.into(),
+            server_args: server_args.iter().map(|arg| arg.to_string()).collect(),
+        }
+    }
+
+    fn state(model: &str) -> Arc<Mutex<Backend>> {
+        Arc::new(Mutex::new(Backend { model: model.into(), child: None, active: 0, last_used: Instant::now() }))
+    }
+
+    /// Stops the model server when a test ends, even by failing.
+    struct Reaper(Arc<Mutex<Backend>>);
+
+    impl Drop for Reaper {
+        fn drop(&mut self) {
+            let backend = self.0.lock();
+            if let Some(mut child) = backend.unwrap_or_else(|poisoned| poisoned.into_inner()).child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    /// Send one raw request through `handle` and return the whole response.
+    fn ask(config: &Arc<Config>, state: &Arc<Mutex<Backend>>, request: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let (config, state) = (config.clone(), state.clone());
+        let server = thread::spawn(move || handle(accepted, &config, &state));
+        client.write_all(request.as_bytes()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap().unwrap();
+        response
+    }
+
+    fn get(path: &str) -> String {
+        format!("GET {path} HTTP/1.1\r\nHost: test\r\n\r\n")
+    }
+
+    fn post(path: &str, body: &str) -> String {
+        format!("POST {path} HTTP/1.1\r\nHost: test\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+    }
+
+    fn args(list: &[&str]) -> impl Iterator<Item = String> {
+        list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>().into_iter()
+    }
+
+    /// Not a test: the model server that `starts_on_demand_and_stops_when_idle`
+    /// runs, by starting this test binary again with this test picked out.
+    #[test]
+    #[ignore = "a fake model server, started by other tests"]
+    fn fake_model_server() {
+        let Some(port) = std::env::args().find_map(|arg| arg.strip_prefix("port=")?.parse::<u16>().ok()) else {
+            return;
+        };
+        // Should the test that started it fail before stopping it, don't
+        // outlive it for long.
+        thread::spawn(|| {
+            thread::sleep(Duration::from_secs(60));
+            std::process::exit(0);
+        });
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut seen = Vec::new();
+            let mut buffer = [0; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&buffer[..n]),
+                }
+            }
+            let first = String::from_utf8_lossy(&seen).lines().next().unwrap_or_default().to_string();
+            let body = format!("model server saw: {first}");
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    }
+
+    #[test]
+    fn options_and_their_mistakes() {
+        assert!(parse_args(args(&["--help"])).unwrap().is_none());
+        let config = parse_args(args(&[
+            "--model", "/models/qwen", "--listen", "127.0.0.1:9000", "--backend-port", "9001", "--idle", "30",
+            "--server", "my-server", "--", "--model", "{model}",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.model, "/models/qwen");
+        assert_eq!(config.listen, "127.0.0.1:9000");
+        assert_eq!(config.backend_port, 9001);
+        assert_eq!(config.idle, Duration::from_secs(30));
+        assert_eq!(config.server, "my-server");
+        // Everything after -- goes to the model server, flags included.
+        assert_eq!(config.server_args, ["--model", "{model}"]);
+
+        let error = |list: &[&str]| parse_args(args(list)).err().expect("should fail").to_string();
+        assert!(error(&[]).contains("no model given"));
+        assert!(error(&["--model"]).contains("--model needs a value"));
+        assert!(error(&["--model", "m", "--verbose"]).contains("unknown option --verbose"));
+        error(&["--model", "m", "--backend-port", "70000"]);
+        error(&["--model", "m", "--idle", "soon"]);
+    }
+
+    #[test]
+    fn model_names_are_the_last_part_of_the_path() {
+        assert_eq!(name(Path::new("/models/Qwen3-4B-4bit")), "Qwen3-4B-4bit");
+        assert_eq!(name(Path::new("/models/Qwen3-4B-4bit/")), "Qwen3-4B-4bit");
+        assert_eq!(name(Path::new("mlx-community/gemma-3n")), "gemma-3n");
+    }
+
+    #[test]
+    fn starts_on_demand_and_stops_when_idle() {
+        let exe = std::env::current_exe().unwrap();
+        let fake = ["serve::tests::fake_model_server", "--exact", "--ignored", "--nocapture", "port={port}"];
+        let config = Arc::new(config(exe.to_str().unwrap(), &fake));
+        let state = state("test-model");
+        let _reaper = Reaper(state.clone());
+
+        let response = ask(&config, &state, &get("/v1/models"));
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        // The request reaches the model server as the client sent it.
+        assert!(response.ends_with("model server saw: GET /v1/models HTTP/1.1"), "{response}");
+        {
+            let backend = state.lock().unwrap();
+            assert!(backend.child.is_some(), "the model server should still be running");
+            assert_eq!(backend.active, 0, "the finished request should no longer count");
+        }
+        // A second request uses the server that is already up.
+        let pid = state.lock().unwrap().child.as_ref().unwrap().id();
+        assert!(ask(&config, &state, &get("/v1/models")).ends_with("model server saw: GET /v1/models HTTP/1.1"));
+        assert_eq!(state.lock().unwrap().child.as_ref().unwrap().id(), pid);
+
+        // Busy: not stopped, however long it has been.
+        state.lock().unwrap().active = 1;
+        stop_if_idle(&config, &state);
+        assert!(state.lock().unwrap().child.is_some());
+        state.lock().unwrap().active = 0;
+        stop_if_idle(&config, &state);
+        assert!(state.lock().unwrap().child.is_none());
+        assert!(TcpStream::connect(("127.0.0.1", config.backend_port)).is_err(), "the model server should be gone");
+    }
+
+    #[test]
+    fn a_model_server_that_cannot_start_is_a_503() {
+        let state = state("test-model");
+
+        let missing = Arc::new(config("/nonexistent/model-server", &[]));
+        let response = ask(&missing, &state, &get("/v1/models"));
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        assert!(response.contains("can't run /nonexistent/model-server"), "{response}");
+
+        // `false` exits at once with any arguments.
+        let quits = Arc::new(config("false", &[]));
+        let response = ask(&quits, &state, &get("/v1/models"));
+        assert!(response.contains("model server stopped during start"), "{response}");
+
+        // Something else already has the port: our server could never bind it.
+        let squatter = TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = Arc::new(Config { backend_port: squatter.local_addr().unwrap().port(), ..config("false", &[]) });
+        let response = ask(&taken, &state, &get("/v1/models"));
+        assert!(response.contains("is already in use"), "{response}");
+
+        let backend = state.lock().unwrap();
+        assert!(backend.child.is_none());
+        assert_eq!(backend.active, 0);
+    }
+
+    #[test]
+    fn only_the_model_api_starts_the_model_server() {
+        // A server that would fail if it were started.
+        let config = Arc::new(config("/nonexistent/model-server", &[]));
+        let state = state("test-model");
+
+        let page = ask(&config, &state, &get("/"));
+        assert!(page.starts_with("HTTP/1.1 200 OK") && page.contains("text/html"), "{page}");
+        let info = ask(&config, &state, &get("/info?fresh=1"));
+        assert!(info.starts_with("HTTP/1.1 200 OK") && info.contains(env!("CARGO_PKG_VERSION")), "{info}");
+        assert!(ask(&config, &state, &get("/elsewhere")).starts_with("HTTP/1.1 404"));
+        // Nothing at all, then a half-sent head: no answer and no error.
+        assert_eq!(ask(&config, &state, ""), "");
+        assert_eq!(ask(&config, &state, "GET / HTTP/1.1\r\n"), "");
+        assert!(state.lock().unwrap().child.is_none());
+    }
+
+    #[test]
+    fn models_come_from_the_model_directory_and_switch_by_name() {
+        let base = std::env::temp_dir().join(format!("nibble-serve-test-{}", std::process::id()));
+        for dir in ["b-model", "a-model", ".cache"] {
+            std::fs::create_dir_all(base.join(dir)).unwrap();
+        }
+        let first = base.join("b-model").to_string_lossy().into_owned();
+        FIRST_MODEL.set(first.clone()).unwrap();
+
+        // Sorted, by name, without hidden entries.
+        let names: Vec<String> = models().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["a-model", "b-model"]);
+        assert_eq!(info()["models"], json!(["a-model", "b-model"]));
+
+        let config = Arc::new(config("/nonexistent/model-server", &[]));
+        let state = state(&first);
+        let switch_to = |model: &str| ask(&config, &state, &post("/model", &json!({ "model": model }).to_string()));
+
+        // Only a model from the list, never a path the client names.
+        let response = switch_to("/etc");
+        assert!(response.starts_with("HTTP/1.1 404") && response.contains("no model called \"/etc\""), "{response}");
+        let response = ask(&config, &state, &post("/model", "not json"));
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        // The model already in use: nothing to do.
+        let response = switch_to("b-model");
+        assert!(response.starts_with("HTTP/1.1 200 OK") && response.contains("\"a-model\""), "{response}");
+        assert_eq!(state.lock().unwrap().model, first);
+        // Never mid-reply.
+        state.lock().unwrap().active = 1;
+        let response = switch_to("a-model");
+        assert!(response.starts_with("HTTP/1.1 409"), "{response}");
+        assert_eq!(state.lock().unwrap().model, first);
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

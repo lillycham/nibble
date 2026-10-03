@@ -334,3 +334,111 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome(reply: &str, exhausted: bool) -> chat::Outcome {
+        chat::Outcome { reply: reply.into(), exhausted }
+    }
+
+    fn call(name: &str, arguments: Value) -> (String, bool) {
+        let result = call_tool(&json!({ "name": name, "arguments": arguments }));
+        (result["content"][0]["text"].as_str().unwrap().to_string(), result["isError"].as_bool().unwrap())
+    }
+
+    #[test]
+    fn reports_read_as_status_notes_answer() {
+        let report = Report { status: "ok", notes: vec!["read: a.txt".into()], answer: "  yes  \n".into() };
+        assert_eq!(report.text(), "status: ok\nread: a.txt\nanswer:\nyes\n");
+        // No answer, no answer heading.
+        let report = Report { status: "too_large", notes: Vec::new(), answer: " ".into() };
+        assert_eq!(report.text(), "status: too_large\n");
+        assert_eq!(Report::error("boom").text(), "status: error\nanswer:\nboom\n");
+    }
+
+    #[test]
+    fn replies_are_judged() {
+        let notes = || vec!["note".to_string()];
+        let report = judge(outcome("  The answer.\n", false), notes());
+        assert_eq!((report.status, report.answer.as_str(), report.notes.len()), ("ok", "The answer.", 1));
+        // The model may give up, with or without a reason.
+        let report = judge(outcome("TOO_HARD: the file is minified", false), notes());
+        assert_eq!((report.status, report.answer.as_str()), ("too_hard", "the file is minified"));
+        assert_eq!(judge(outcome("TOO_HARD", false), notes()).status, "too_hard");
+        // Out of rounds: whatever it said is a guess.
+        assert_eq!(judge(outcome("probably main.rs", true), notes()).status, "too_hard");
+        assert_eq!(judge(outcome(" \n", false), notes()).status, "error");
+    }
+
+    #[test]
+    fn arguments_are_checked() {
+        let args = json!({ "task": "  find it ", "blank": "  ", "number": 3, "paths": ["a", 7, "b"] });
+        assert_eq!(text_arg(&args, "task").ok(), Some("find it"));
+        for key in ["blank", "number", "absent"] {
+            assert_eq!(text_arg(&args, key).err().unwrap().answer, format!("missing argument: {key}"));
+        }
+        assert_eq!(paths_arg(&args), ["a", "b"]);
+        assert!(paths_arg(&json!({ "paths": "a" })).is_empty());
+        assert!(paths_arg(&json!({})).is_empty());
+        assert_eq!(attach("a.txt", "one\ntwo\n\n"), "\n\n<file path=\"a.txt\">\none\ntwo\n</file>");
+    }
+
+    #[test]
+    fn bad_calls_fail_before_the_model_runs() {
+        // None of these reach the model server, which isn't running.
+        let (text, error) = call("summon", json!({}));
+        assert!(error && text.contains("there is no tool called summon"), "{text}");
+        let (text, error) = call("delegate", json!({ "paths": ["a.txt"] }));
+        assert!(error && text.contains("missing argument: task"), "{text}");
+        let (text, error) = call("map", json!({ "prompt": "what is it?" }));
+        assert!(error && text.contains("missing argument: paths"), "{text}");
+        let (text, error) = call("map", json!({ "paths": ["a.txt"] }));
+        assert!(error && text.contains("missing argument: prompt"), "{text}");
+
+        let limit = config::get().map_max_files;
+        let paths: Vec<String> = (0..=limit).map(|n| format!("file{n}.txt")).collect();
+        let (text, error) = call("map", json!({ "prompt": "what is it?", "paths": paths }));
+        assert!(!error && text.starts_with("status: too_large\n"), "{text}");
+        assert!(text.contains(&format!("{} files given, limit {limit} per call", limit + 1)), "{text}");
+    }
+
+    #[test]
+    fn the_handshake_and_tool_list() {
+        let result = initialize(&json!({ "protocolVersion": "2025-03-26" }));
+        assert_eq!(result["protocolVersion"], "2025-03-26");
+        assert_eq!(result["serverInfo"]["name"], "nibble");
+        assert_eq!(result["instructions"], INSTRUCTIONS);
+        // A version we don't know gets the newest we do.
+        assert_eq!(initialize(&json!({ "protocolVersion": "1999-01-01" }))["protocolVersion"], PROTOCOLS[0]);
+        assert_eq!(initialize(&json!({}))["protocolVersion"], PROTOCOLS[0]);
+
+        let tools = tool_list();
+        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["delegate", "map"]);
+        assert_eq!(tools[0]["inputSchema"]["required"], json!(["task"]));
+        assert_eq!(tools[1]["inputSchema"]["required"], json!(["prompt", "paths"]));
+        // The limits Claude is told are the ones in force.
+        let described = tools[1]["description"].as_str().unwrap();
+        assert!(described.contains(&format!("At most {} files", config::get().map_max_files)), "{described}");
+    }
+
+    #[test]
+    fn roots_must_be_asked_for_and_never_slash() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>().into_iter();
+        let error = |list: &[&str]| roots(args(list)).expect_err("should fail").to_string();
+
+        assert!(roots(args(&["--help"])).unwrap().is_none());
+        assert!(error(&["--root"]).contains("--root needs a value"));
+        assert!(error(&["--all"]).contains("unknown option --all"));
+        assert!(error(&["--root", "/"]).contains("refusing to use / as a root"));
+        // The real path counts, so a way round to / is refused too.
+        assert!(error(&["--root", "/usr/.."]).contains("refusing to use / as a root"));
+        assert!(error(&["--root", "/nonexistent/nibble"]).contains("/nonexistent/nibble"));
+
+        let dir = std::env::temp_dir();
+        let given = dir.to_string_lossy().into_owned();
+        assert_eq!(roots(args(&["--root", &given, "--root", &given])).unwrap().unwrap(), [dir.clone(), dir]);
+    }
+}
