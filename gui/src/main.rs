@@ -17,9 +17,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    App, Application, Bounds, Context, Div, Entity, Focusable, Hsla, KeyBinding, ScrollHandle, SharedString,
+    Animation, AnimationExt, App, Application, Bounds, Context, Div, Entity, Focusable, Hsla, KeyBinding, ScrollHandle, SharedString,
     Stateful, TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div,
-    point, prelude::*, px, rgb, size,
+    point, prelude::*, pulsating_between, px, rgb, size,
 };
 use serde_json::{Map, Value, json};
 
@@ -170,6 +170,9 @@ impl Server {
 #[derive(Default)]
 struct Models {
     current: String,
+    /// Whether the model is in memory: "idle", "loading" or "loaded". Empty
+    /// from a server too old to say.
+    state: String,
     all: Vec<String>,
     /// The settings the server really uses, for the settings page to show
     /// in place of its default hints.
@@ -180,8 +183,9 @@ impl Models {
     fn from(info: &Value) -> Option<Self> {
         let current = info["model"].as_str().filter(|name| !name.is_empty())?.to_string();
         let all = info["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        let state = info["state"].as_str().unwrap_or_default().to_string();
         let in_use = info["settings"].as_object().cloned().unwrap_or_default();
-        Some(Models { current, all, in_use })
+        Some(Models { current, state, all, in_use })
     }
 }
 
@@ -189,6 +193,8 @@ enum Event {
     Text(String),
     Tool(String),
     Error(String),
+    /// The turn is over; what it cost.
+    Done(Value),
 }
 
 /// One chat turn, on a plain thread: the request blocks, and GPUI's own
@@ -220,6 +226,8 @@ fn ask(server: &Server, body: &Value, stop: &AtomicBool, events: &mpsc::Unbounde
             Event::Tool(tool.to_string())
         } else if let Some(error) = data["error"].as_str() {
             Event::Error(error.to_string())
+        } else if data["done"].as_bool() == Some(true) {
+            Event::Done(data["stats"].clone())
         } else {
             continue;
         };
@@ -252,6 +260,11 @@ struct Nibble {
     /// part and block. A turn's own message is part `usize::MAX`.
     texts: HashMap<(usize, usize, usize), Entity<TextInput>>,
     chats: Vec<Entry>,
+    /// Each finished turn's stats line, by turn. Not saved with the chat.
+    stats: HashMap<usize, String>,
+    /// How much of the room for the conversation the last turn took, from
+    /// 0 to 1: once full, the oldest messages are left out.
+    context: Option<f32>,
     scroll: ScrollHandle,
     /// Set while a reply is arriving. Raising the flag stops it.
     running: Option<Arc<AtomicBool>>,
@@ -297,6 +310,8 @@ impl Nibble {
             chat: Chat::new(),
             texts: HashMap::new(),
             chats: store::list(),
+            stats: HashMap::new(),
+            context: None,
             scroll: ScrollHandle::new(),
             running: None,
             epoch: 0,
@@ -307,7 +322,45 @@ impl Nibble {
             notice: None,
         };
         nibble.find_model(cx);
+        nibble.watch_model(cx);
         nibble
+    }
+
+    /// Keep the model's state in the status bar current. Every second while
+    /// a reply is awaited or the model loads, so a cold start shows as one;
+    /// otherwise every 15 s, which notices the model being let go when idle.
+    fn watch_model(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let mut ticks = 0;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                ticks += 1;
+                let Ok((server, soon)) = this.update(cx, |nibble, _| (nibble.server.clone(), nibble.awaiting_model()))
+                else {
+                    return;
+                };
+                if !soon && ticks < 15 {
+                    continue;
+                }
+                ticks = 0;
+                let models = cx.background_executor().spawn(async move { server.models() }).await;
+                let shown = this.update(cx, |nibble, cx| {
+                    nibble.models = models.unwrap_or_default();
+                    cx.notify();
+                });
+                if shown.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Whether the model is loading, or a reply has been asked for and
+    /// nothing of it has come yet.
+    fn awaiting_model(&self) -> bool {
+        let silent = self.chat.turns.last().is_some_and(|turn| turn.parts.is_empty());
+        self.models.state == "loading" || (self.running.is_some() && silent)
     }
 
     /// Ask the server which models it has, off the main thread, for the header.
@@ -437,6 +490,14 @@ impl Nibble {
             (Event::Text(text), _) => turn.parts.push(Part::Text(text)),
             (Event::Tool(tool), _) => turn.parts.push(Part::Tool(tool)),
             (Event::Error(error), _) => turn.parts.push(Part::Error(error)),
+            (Event::Done(stats), _) => {
+                if let Some(line) = stats_line(&stats) {
+                    self.stats.insert(self.chat.turns.len() - 1, line);
+                }
+                if let (Some(used), Some(room)) = (stats["prompt_chars"].as_f64(), stats["input_chars"].as_f64()) {
+                    self.context = (room > 0.).then(|| (used / room).min(1.) as f32);
+                }
+            }
         }
         self.scroll.scroll_to_bottom();
         cx.notify();
@@ -474,6 +535,8 @@ impl Nibble {
         self.keep();
         self.chat = chat;
         self.texts.clear();
+        self.stats.clear();
+        self.context = None;
         self.view = View::Chat;
         self.scroll.scroll_to_bottom();
         window.focus(&self.input.focus_handle(cx));
@@ -760,6 +823,45 @@ fn tool_line(tool: &str, theme: &Theme) -> Div {
         })
 }
 
+/// What a turn cost, in one line, as the command line shows it after each
+/// answer. Token counts only when the server gives them.
+fn stats_line(stats: &Value) -> Option<String> {
+    let waiting = stats["waiting_ms"].as_f64()? / 1000.;
+    let writing = stats["writing_ms"].as_f64().unwrap_or(0.) / 1000.;
+    let mut line = match stats["prompt_tokens"].as_u64() {
+        Some(tokens) => format!("Prompt {tokens} tokens"),
+        None => format!("Prompt {} characters", stats["prompt_chars"].as_u64()?),
+    };
+    if let Some(tokens) = stats["reply_tokens"].as_u64() {
+        line += &format!(" · reply {tokens} tokens");
+        if writing > 0. {
+            line += &format!(" at {:.1} tokens/s", tokens as f64 / writing);
+        }
+    }
+    line += &format!(" · {waiting:.1} s to the first token · {:.1} s in all", waiting + writing);
+    Some(line)
+}
+
+/// How full the conversation is: a short bar and a percentage. Ochre when
+/// nearly full, since past that the oldest messages are left out.
+fn context_meter(used: f32, theme: &Theme) -> impl IntoElement {
+    let colour = if used >= 0.85 { theme.ochre } else { theme.blue };
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .w(px(48.))
+                .h(px(5.))
+                .rounded_full()
+                .bg(theme.box_line.opacity(0.6))
+                .child(div().h_full().rounded_full().w(px(48. * used)).bg(colour)),
+        )
+        .child(SharedString::from(format!("{:.0}% of context", used * 100.)))
+}
+
 fn capital(word: &str) -> String {
     let mut chars = word.chars();
     chars.next().map_or(String::new(), |first| first.to_uppercase().chain(chars).collect())
@@ -888,12 +990,32 @@ impl Nibble {
             )
     }
 
-    /// The strip along the bottom: the server and its model, and the way
-    /// to the settings.
+    /// The strip along the bottom: the model and whether it is loaded, and
+    /// the way to the settings.
     fn status_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let reached = !self.models.current.is_empty();
         let address = self.server.url.trim_start_matches("http://").trim_start_matches("https://").to_string();
         let ink = theme.ink;
+        // Sage once the model is in memory, ochre while it loads, grey when
+        // it is not loaded (it loads with the next message) or out of reach.
+        let (dot, state) = match self.models.state.as_str() {
+            _ if !reached => (theme.box_line, None),
+            "loading" => (theme.ochre, Some("loading…")),
+            "idle" => (theme.box_line, Some("not loaded")),
+            "loaded" => (theme.sage, Some("loaded")),
+            _ => (theme.sage, None),
+        };
+        let dot = div().size(px(7.)).rounded_full().bg(dot);
+        let dot = if self.models.state == "loading" {
+            dot.with_animation(
+                "loading",
+                Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.3, 1.)),
+                |dot, delta| dot.opacity(delta),
+            )
+            .into_any_element()
+        } else {
+            dot.into_any_element()
+        };
         div()
             .h(px(28.))
             .flex_shrink_0()
@@ -912,18 +1034,16 @@ impl Nibble {
                     .flex_shrink_0()
                     .items_center()
                     .gap(px(6.))
-                    .child(div().size(px(7.)).rounded_full().bg(if reached { theme.sage } else { theme.box_line }))
-                    .child(SharedString::from(if reached {
-                        format!("nibble serve · {address}")
-                    } else {
-                        format!("no answer from {address}")
-                    })),
+                    .child(dot)
+                    .when(!reached, |status| status.child(SharedString::from(format!("No answer from {address}"))))
+                    .when(reached, |status| status.child(self.model_picker(theme, cx)))
+                    .when_some(state, |status, state| status.child(state)),
             )
-            .child(self.model_picker(theme, cx))
             .when_some(self.model_error.clone(), |bar, error| {
                 bar.child(div().min_w_0().truncate().text_color(theme.rose).child(error))
             })
             .child(div().flex_1())
+            .when_some(self.context, |bar, used| bar.child(context_meter(used, theme)))
             .child(div().flex_shrink_0().child("⌘N new chat"))
             .child(
                 div()
@@ -944,6 +1064,8 @@ impl Nibble {
         n: usize,
         turn: &Turn,
         waiting: bool,
+        loading: bool,
+        stats: Option<&String>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1003,8 +1125,30 @@ impl Nibble {
                     .flex_col()
                     .gap_1()
                     .children(parts)
-                    .when(waiting && turn.answer().is_empty(), |log| log.child(div().text_color(theme.ochre).child("Thinking…")))
-                    .children(copy.map(|copy| div().pt_2().flex().child(copy))),
+                    .when(waiting && turn.answer().is_empty(), |log| {
+                        // A cold start can take a while, so say what it is.
+                        log.child(div().text_color(theme.ochre).child(if loading { "Loading the model…" } else { "Thinking…" }))
+                    })
+                    .when(copy.is_some() || stats.is_some(), |log| {
+                        log.child(
+                            div()
+                                .pt_2()
+                                .flex()
+                                .items_center()
+                                .gap_4()
+                                .children(copy)
+                                .when_some(stats, |row, stats| {
+                                    row.child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(11.5))
+                                            .text_color(theme.muted)
+                                            .child(SharedString::from(stats.clone())),
+                                    )
+                                }),
+                        )
+                    }),
             )
     }
 
@@ -1039,12 +1183,16 @@ impl Nibble {
             ))
         } else {
             let (texts, count, running) = (&mut self.texts, self.chat.turns.len(), self.running.is_some());
+            let (stats, loading) = (&self.stats, self.models.state == "loading");
             let turns: Vec<_> = self
                 .chat
                 .turns
                 .iter()
                 .enumerate()
-                .map(|(n, turn)| Self::turn(texts, n, turn, running && n + 1 == count, theme, cx).into_any_element())
+                .map(|(n, turn)| {
+                    let waiting = running && n + 1 == count;
+                    Self::turn(texts, n, turn, waiting, loading, stats.get(&n), theme, cx).into_any_element()
+                })
                 .collect();
             div()
                 .id("log")
@@ -1524,4 +1672,22 @@ fn main() {
         .unwrap();
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_stats_line_reads_like_the_command_line() {
+        let stats = json!({ "prompt_tokens": 500, "reply_tokens": 60, "prompt_chars": 900, "waiting_ms": 500, "writing_ms": 2000 });
+        assert_eq!(
+            stats_line(&stats).unwrap(),
+            "Prompt 500 tokens · reply 60 tokens at 30.0 tokens/s · 0.5 s to the first token · 2.5 s in all"
+        );
+        // A server that gives no token counts.
+        let stats = json!({ "prompt_chars": 900, "waiting_ms": 1300, "writing_ms": 0 });
+        assert_eq!(stats_line(&stats).unwrap(), "Prompt 900 characters · 1.3 s to the first token · 1.3 s in all");
+        assert!(stats_line(&json!(null)).is_none());
+    }
 }

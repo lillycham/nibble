@@ -102,6 +102,13 @@
   model and is not timed. `--model NAME` (repeatable) switches `nibble serve`
   to each model in turn, with its presets, and back at the end. An answer is
   right when it holds every expected term as a whole word or number.
+- The window's status bar says whether the model is loaded, loading or not
+  loaded (`GET /info` has `state`), and while it loads the turn says
+  "Loading the model…" in place of "Thinking…". Under each reply is the
+  stats line the command line prints; `/chat` sends the numbers with its
+  `done` event, with `input_chars`, so the status bar also shows how full
+  the conversation is ("41% of context", ochre from 85%, past which the
+  oldest messages are left out). Stats are not saved with the chat.
 
 ## Roadmap
 
@@ -132,9 +139,6 @@ and `-f FILE`.
 - A selection in a reply stays inside one block (a run of text or a code
   block). Selecting across blocks would need one text element for the whole
   reply; until then, Copy takes all of it.
-- Model state in the status bar: idle, loading or loaded. A cold start is the
-  slow part, and today it looks like a hang.
-- Stats line per turn in the window, as the command line has.
 - Attach files by dragging them into the window, as `-f FILE` does on the
   command line.
 
