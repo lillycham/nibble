@@ -61,11 +61,11 @@ pub struct Config {
     pub token: String,
     /// A file that holds the token, for setups where the config file is public.
     pub token_file: String,
-    /// Named prompts with settings: the built-in ones, then the file's.
-    pub recipes: Vec<crate::recipes::Recipe>,
     /// MCP servers whose tools a chat may ask for, by name. Each is checked
     /// when the config is read. None is used unless a chat asks for it.
     pub plugins: Map<String, Value>,
+    /// Named prompts with settings: the built-in ones, then the file's.
+    pub recipes: Vec<crate::recipes::Recipe>,
 }
 
 impl Default for Config {
@@ -96,8 +96,8 @@ impl Default for Config {
             server_args: Vec::new(),
             token: String::new(),
             token_file: String::new(),
-            recipes: crate::recipes::built_in(),
             plugins: Map::new(),
+            recipes: crate::recipes::built_in(),
         }
     }
 }
@@ -145,7 +145,6 @@ impl Config {
             "server_args" => list(value).map(|v| self.server_args = v),
             "token" => text(value).map(|v| self.token = v),
             "token_file" => text(value).map(|v| self.token_file = v),
-            "recipes" => return crate::recipes::merge(&mut self.recipes, value),
             "plugins" => {
                 let plugins = value.as_object().ok_or("\"plugins\" must be an object")?;
                 for (name, plugin) in plugins {
@@ -154,6 +153,7 @@ impl Config {
                 self.plugins = plugins.clone();
                 Some(())
             }
+            "recipes" => return crate::recipes::merge(&mut self.recipes, value),
             // A typo should be loud, not a setting that quietly does nothing.
             _ => return Err(format!("unknown setting \"{key}\"")),
         };
@@ -191,8 +191,8 @@ impl Config {
             // Never print the secret itself.
             "token": if self.token.is_empty() { "" } else { "(set)" },
             "token_file": self.token_file,
-            "recipes": crate::recipes::to_json(&self.recipes),
             "plugins": self.plugins,
+            "recipes": crate::recipes::to_json(&self.recipes),
         })
     }
 }

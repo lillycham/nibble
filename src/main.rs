@@ -34,8 +34,8 @@ const USAGE: &str = "usage: nibble [options] [PROMPT...]
        nibble RECIPE [options] [TEXT...]
        nibble config
        nibble chats
-       nibble recipes
        nibble plugins
+       nibble recipes
 
 Text piped on stdin is given to the model as input for the prompt.
 With no prompt and no pipe, nibble starts a chat, which is saved as it goes.
@@ -85,6 +85,10 @@ struct Args {
     files: String,
     attached: Vec<(String, String)>,
     tools: Vec<Value>,
+    /// Whether `tools` holds the file tools, which quotes may be checked against.
+    file_tools: bool,
+    /// The tools of the plugins asked for, also in `tools`.
+    plugin_tools: Vec<Value>,
     stats: bool,
     resume: Option<Resume>,
     save: bool,
@@ -114,7 +118,7 @@ impl Args {
     /// Quote mode's sources for these settings: the attached files, and the
     /// files the tools can read.
     fn sources(&self) -> Sources {
-        let mut sources = Sources::new(!self.tools.is_empty());
+        let mut sources = Sources::new(self.file_tools);
         for (path, text) in &self.attached {
             sources.give(path, text);
         }
@@ -125,9 +129,13 @@ impl Args {
     fn with(&self, recipe: &Recipe) -> Result<Args, String> {
         let mut args = self.clone();
         if recipe.tools == Some(false) {
-            args.tools.clear();
+            // Plugins were asked for by name, so they stay.
+            args.tools.clone_from(&args.plugin_tools);
+            args.file_tools = false;
         }
-        plugins::add(&mut args.tools, plugins::start(&recipe.plugins)?);
+        let more = plugins::start(&recipe.plugins)?;
+        plugins::add(&mut args.plugin_tools, more.clone());
+        plugins::add(&mut args.tools, more);
         if let Some(max_tokens) = recipe.max_tokens {
             args.max_tokens = max_tokens;
         }
@@ -204,11 +212,27 @@ fn parse_args(
         }
         system
     });
+    let file_tools = tools;
     let mut tools = if tools { tools::schemas(claude) } else { Vec::new() };
     // Asked for by name, so offered even with piped input or attached files.
-    plugins::add(&mut tools, plugins::start(&plugins)?);
-    let mut args =
-        Args { system, max_tokens, prompt: words.join(" "), files, attached, tools, stats, resume, save, quotes: None, piped };
+    let mut plugin_tools = Vec::new();
+    plugins::add(&mut plugin_tools, plugins::start(&plugins)?);
+    plugins::add(&mut tools, plugin_tools.clone());
+    let mut args = Args {
+        system,
+        max_tokens,
+        prompt: words.join(" "),
+        files,
+        attached,
+        tools,
+        file_tools,
+        plugin_tools,
+        stats,
+        resume,
+        save,
+        quotes: None,
+        piped,
+    };
     if quote {
         args.quotes = Some(args.sources());
     }
@@ -331,12 +355,15 @@ impl Repl {
             }
             ["off", name] => {
                 let names = plugins::tool_names(name);
-                self.args.tools.retain(|t| !t["function"]["name"].as_str().is_some_and(|n| names.iter().any(|m| m == n)));
+                let theirs = |t: &Value| t["function"]["name"].as_str().is_some_and(|n| names.iter().any(|m| m == n));
+                self.args.tools.retain(|t| !theirs(t));
+                self.args.plugin_tools.retain(|t| !theirs(t));
                 eprintln!("nibble: {name} off");
             }
             [name] => {
                 let schemas = plugins::start(&[name.to_string()])?;
                 let count = schemas.len();
+                plugins::add(&mut self.args.plugin_tools, schemas.clone());
                 plugins::add(&mut self.args.tools, schemas);
                 eprintln!("nibble: {name} on, with {count} tool{}", if count == 1 { "" } else { "s" });
             }
@@ -556,14 +583,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             sessions::show_list();
             return Ok(());
         }
+        Some("plugins") => {
+            plugins::show();
+            return Ok(());
+        }
         Some("recipes") => {
             for recipe in &config::get().recipes {
                 println!("{:<14}{}", recipe.name, recipe.description);
             }
-            return Ok(());
-        }
-        Some("plugins") => {
-            plugins::show();
             return Ok(());
         }
         _ => {}
