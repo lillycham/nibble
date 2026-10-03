@@ -93,8 +93,21 @@ impl Request {
         given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
     }
 
+    pub fn content_length(&self) -> usize {
+        self.content_length
+    }
+
+    /// The request line and headers, up to and including the blank line.
+    pub fn head(&self) -> &[u8] {
+        &self.raw[..self.head_len]
+    }
+
     pub fn body(&self, client: &mut TcpStream) -> io::Result<Vec<u8>> {
-        if self.content_length > MAX_BODY {
+        self.body_within(client, MAX_BODY)
+    }
+
+    pub fn body_within(&self, client: &mut TcpStream, limit: usize) -> io::Result<Vec<u8>> {
+        if self.content_length > limit {
             return Err(io::Error::other("request body too large"));
         }
         let mut body = self.raw[self.head_len..].to_vec();
