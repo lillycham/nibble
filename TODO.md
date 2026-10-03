@@ -139,6 +139,11 @@ and `-f FILE`.
   `/model`, `/clear`, `/settings`), then recipes, which are named prompts with
   settings (`/summarise`, `/commit`), declared in the config file or the Nix
   module. On the command line the same recipes are `nibble commit` and so on.
+- `/quote` in the window and the chat REPL: turn quote-your-evidence mode on
+  for the chat, and show which quotes were found under each reply. The window
+  goes through `POST /chat`, so that needs a `quote` field there and the check
+  done in `nibble serve`, against the files its chats may read. A natural
+  setting for recipes too.
 - Plugins, later. Open questions: the form (external programs that speak a
   small JSON protocol, or nibble as an MCP client, which would reuse existing
   MCP servers as plugins), and the context budget: each tool schema costs
