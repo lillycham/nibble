@@ -111,7 +111,7 @@ fn paths_arg(args: &Value) -> Vec<&str> {
     args["paths"].as_array().map(|paths| paths.iter().filter_map(Value::as_str).collect()).unwrap_or_default()
 }
 
-fn attach(path: &str, text: &str) -> String {
+pub fn attach(path: &str, text: &str) -> String {
     format!("\n\n<file path=\"{path}\">\n{}\n</file>", text.trim_end())
 }
 
@@ -340,7 +340,7 @@ mod tests {
     use super::*;
 
     fn outcome(reply: &str, exhausted: bool) -> chat::Outcome {
-        chat::Outcome { reply: reply.into(), exhausted }
+        chat::Outcome { reply: reply.into(), exhausted, stats: Default::default() }
     }
 
     fn call(name: &str, arguments: Value) -> (String, bool) {

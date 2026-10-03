@@ -76,7 +76,8 @@ pub fn read_request(client: &mut TcpStream) -> io::Result<Option<Request>> {
 impl Request {
     /// The page carries no secrets, and a browser can't send a token when it
     /// first opens it, so it needs none. Nor does /info, which only names the
-    /// models, and which a client asks before it has read its settings.
+    /// models, and which a client asks before it has read its settings. It
+    /// adds the settings in use only for a client with the token.
     pub fn is_public(&self) -> bool {
         self.method == "GET" && (self.path == "/" || self.path == "/info")
     }
@@ -147,8 +148,7 @@ impl chat::Events for Stream<'_> {
     }
 
     fn tool(&mut self, name: &str, arguments: &Value) -> io::Result<()> {
-        let about = arguments["text"].as_str().or(arguments["path"].as_str()).unwrap_or(".");
-        self.send(json!({ "tool": format!("{name} {about}") }))
+        self.send(json!({ "tool": chat::describe(name, arguments) }))
     }
 }
 
@@ -192,7 +192,7 @@ fn chat_turn(client: &mut TcpStream, request: &Request) -> io::Result<()> {
 pub fn route(client: &mut TcpStream, request: &Request) -> io::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => respond(client, "200 OK", "text/html; charset=utf-8", PAGE.as_bytes()),
-        ("GET", "/info") => respond(client, "200 OK", "application/json", crate::serve::info().to_string().as_bytes()),
+        ("GET", "/info") => respond(client, "200 OK", "application/json", crate::serve::info(request.authorized()).to_string().as_bytes()),
         ("POST", "/chat") => chat_turn(client, request),
         _ => respond(client, "404 Not Found", "text/plain", b"not found\n"),
     }

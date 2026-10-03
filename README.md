@@ -8,14 +8,17 @@ command-line program is about 1 MB with two dependencies.
 ```bash
 git diff | nibble "Write a commit message for this diff."
 nibble "Which nixpkgs branch does the flake use?"
+nibble -f flake.nix "What does this flake build?"
 nibble            # a chat
+nibble -c         # go on with the last chat
 ```
 
 ## What is in it
 
 - **`nibble`**: one-shot questions, piped input, and a chat. The model can read
   and search files in the current directory, and nothing else. It can't change
-  anything.
+  anything. Chats are saved and shared with the window: `nibble chats` lists
+  them, and `-c` or `-r ID` goes on with one.
 - **`nibble serve`**: a proxy in front of the model server. It starts the model
   on the first request and unloads it after an idle period, so the weights only
   hold memory while something is using them. It also serves a chat page at `/`.

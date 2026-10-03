@@ -181,12 +181,7 @@ static FIRST_MODEL: OnceLock<String> = OnceLock::new();
 /// just downloaded shows up.
 pub fn models() -> Vec<(String, PathBuf)> {
     let first = FIRST_MODEL.get().map(PathBuf::from);
-    let settings = crate::config::get();
-    let dir = match settings.model_dir.as_str() {
-        "" => first.as_deref().and_then(Path::parent).map(Path::to_path_buf),
-        dir => Some(tools::expand(dir)),
-    };
-    let mut found: Vec<PathBuf> = dir
+    let mut found: Vec<PathBuf> = model_dir()
         .and_then(|dir| std::fs::read_dir(dir).ok())
         .into_iter()
         .flatten()
@@ -201,6 +196,21 @@ pub fn models() -> Vec<(String, PathBuf)> {
     models.dedup_by(|a, b| a.0 == b.0);
     models
 }
+
+/// Where the models to choose from are: `model_dir`, or failing that the
+/// directory that holds the model given at the start.
+fn model_dir() -> Option<PathBuf> {
+    match crate::config::get().model_dir.as_str() {
+        "" => FIRST_MODEL.get().map(Path::new).and_then(Path::parent).map(Path::to_path_buf),
+        dir => Some(tools::expand(dir)),
+    }
+}
+
+/// The folders chats may read inside, worked out once at the start.
+static ROOTS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// What the command line gave, which wins over the config file.
+static STARTED: OnceLock<Value> = OnceLock::new();
 
 fn name(path: &Path) -> String {
     let path = path.to_string_lossy();
@@ -235,14 +245,37 @@ fn switch(client: &mut TcpStream, request: &web::Request, state: &Mutex<Backend>
         eprintln!("nibble serve: switched to {wanted}");
         backend.model = path;
     }
-    web::respond(client, "200 OK", "application/json", info().to_string().as_bytes())
+    web::respond(client, "200 OK", "application/json", info(true).to_string().as_bytes())
 }
 
 /// What `GET /info` says: the model, the others to choose from, and more.
-pub fn info() -> Value {
+/// With `settings`, which only a client with the token gets, also the
+/// settings really in use: after the model's presets, with the defaults that
+/// depend on how the server was started filled in. Never the token.
+pub fn info(settings: bool) -> Value {
     let config = crate::config::get();
     let models: Vec<String> = models().into_iter().map(|(name, _)| name).collect();
-    json!({ "model": config.model_name, "models": models, "tools": web::tools_allowed(), "version": env!("CARGO_PKG_VERSION") })
+    let mut info = json!({ "model": config.model_name, "models": models, "tools": web::tools_allowed(), "version": env!("CARGO_PKG_VERSION") });
+    if settings {
+        let mut in_use = config.to_json();
+        let in_use = in_use.as_object_mut().expect("settings are an object");
+        // The address and the token are the client's own business.
+        for key in ["url", "token", "token_file"] {
+            in_use.remove(key);
+        }
+        in_use.insert("tools".into(), json!(web::tools_allowed()));
+        if let Some(dir) = model_dir() {
+            in_use.insert("model_dir".into(), json!(dir.to_string_lossy()));
+        }
+        if let Some(roots) = ROOTS.get() {
+            in_use.insert("roots".into(), json!(roots));
+        }
+        for (key, value) in STARTED.get().and_then(Value::as_object).into_iter().flatten() {
+            in_use.insert(key.clone(), value.clone());
+        }
+        info["settings"] = Value::Object(in_use.clone());
+    }
+    info
 }
 
 fn pipe(mut from: TcpStream, mut to: TcpStream) {
@@ -374,6 +407,13 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
         return Ok(());
     };
     let _ = FIRST_MODEL.set(config.model.clone());
+    let _ = STARTED.set(json!({
+        "listen": config.listen,
+        "backend_port": config.backend_port,
+        "idle_seconds": config.idle.as_secs(),
+        "server_command": config.server,
+        "server_args": config.server_args,
+    }));
     let config = Arc::new(config);
     let backend = Backend { model: config.model.clone(), child: None, active: 0, last_used: Instant::now() };
     let state = Arc::new(Mutex::new(backend));
@@ -415,6 +455,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
         eprintln!("nibble serve: chats have no file tools; set \"roots\" in the config file to give them some");
     }
     web::allow_tools(!roots.is_empty());
+    let _ = ROOTS.set(roots.iter().map(|root| root.display().to_string()).collect());
 
     for sig in [SIGHUP, SIGINT, SIGTERM] {
         unsafe { signal(sig, stop) };
@@ -751,7 +792,14 @@ mod tests {
         // Sorted, by name, without hidden entries.
         let names: Vec<String> = models().into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, ["a-model", "b-model"]);
-        assert_eq!(info()["models"], json!(["a-model", "b-model"]));
+        assert_eq!(info(false)["models"], json!(["a-model", "b-model"]));
+        // Only a client with the token is told the settings, and then the
+        // folder the models were found in, never the token.
+        assert!(info(false).get("settings").is_none());
+        let settings = &info(true)["settings"];
+        assert_eq!(settings["model_dir"], json!(base.to_string_lossy()));
+        assert_eq!(settings["idle_seconds"], json!(600));
+        assert!(settings.get("token").is_none() && settings.get("url").is_none(), "{settings}");
 
         let config = Arc::new(config("/nonexistent/model-server", &[]));
         let state = state(&first);

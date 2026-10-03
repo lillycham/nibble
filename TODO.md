@@ -50,6 +50,25 @@
 - `nibble mcp` asks `nibble serve` for its model before each `tools/list` and
   `tools/call`, and loads that model's presets when it has changed, so a switch
   needs no restart. `NIBBLE_MODEL` pins it.
+- `-f FILE` (repeatable) attaches a file to the prompt, or to a chat's first
+  message, so the model needs no tool round to read it. Like piped input, it
+  turns the tools off unless `--tools` is given. The user named the file, so
+  it may be outside the current directory. Files over `input_chars` are
+  refused, not cut; piped input gets what room is left.
+- Stats line per turn on the command line: prompt size, reply tokens, speed and
+  time to the first token, on stderr. On when stderr is a terminal; `--stats`
+  and `--no-stats` override. Token counts need a server that honours
+  `stream_options.include_usage`; without them it gives the prompt in characters.
+- Saved chats on the command line, in the window's files, so either can go on
+  with a chat from the other. The terminal chat saves as it goes; `-c` goes on
+  with the newest, `-r ID` with any, and `nibble chats` lists them. A one-shot
+  prompt is saved only when it continues a chat. Tool results are not kept, so
+  a resumed chat carries the questions and answers only.
+- `GET /info` with the token adds `settings`: what `nibble serve` really uses,
+  after the model's presets and the command-line flags, with `model_dir` and
+  `roots` worked out. Never the token or `url`. The window's settings page
+  shows these in its empty fields ("in use: 6") in place of the default hints,
+  and asks again each time it opens, so a model switch shows its presets.
 - The window's input wraps and grows to ten lines, then scrolls. Return sends;
   Shift-Return (or Option- or Control-Return) starts a new line, and Up and
   Down move by row. Settings fields wrap a long value onto up to four lines.
@@ -72,15 +91,8 @@
 
 ## Later
 
-- Stats line per turn: prompt size, tokens, speed.
-- `-f FILE` to attach files without a tool round.
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
-- Sessions for the command line: save and resume chats (the window has them).
 - In the window's settings page: a field per model preset, and masking for the token.
-- Settings page: fill each empty field with the value really in use, not a
-  grey hint that repeats a default written into the GUI. The server knows its
-  effective settings (model, roots, limits, presets applied), so it should
-  report them, for example from `/info`, and the page should show those.
 - Write and shell tools behind `--write` and `--shell`.
 - Quote-your-evidence mode: the model quotes the lines behind its answer, and
   nibble checks that each quote appears in the file. Flags invented answers.

@@ -4,7 +4,8 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Write};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::fmt;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -126,6 +127,13 @@ impl Events for Quiet {
     }
 }
 
+/// A tool call in a few words, for a chat's record: the name, and the path
+/// or search text it was given.
+pub fn describe(name: &str, arguments: &Value) -> String {
+    let about = arguments["text"].as_str().or(arguments["path"].as_str()).unwrap_or(".");
+    format!("{name} {about}")
+}
+
 static URL: OnceLock<String> = OnceLock::new();
 
 /// Send requests here instead of to the configured address. `nibble serve`
@@ -138,6 +146,58 @@ pub struct Outcome {
     pub reply: String,
     /// The model was still calling tools when the rounds ran out.
     pub exhausted: bool,
+    pub stats: Stats,
+}
+
+/// What one turn cost. Token counts come from the server, when it reports
+/// them; the times are measured here.
+#[derive(Default)]
+pub struct Stats {
+    /// The last request's prompt, which is how full the window is.
+    prompt_tokens: Option<u64>,
+    prompt_chars: usize,
+    /// Everything the model wrote over the turn, tool calls included.
+    /// Unknown if any request came back without a count.
+    reply_tokens: Option<u64>,
+    requests: u32,
+    /// From each request to its first token: loading and reading the prompt.
+    waiting: Duration,
+    /// From each first token to the end of that reply.
+    writing: Duration,
+}
+
+impl Stats {
+    fn count(&mut self, usage: &Value) {
+        self.prompt_tokens = usage["prompt_tokens"].as_u64();
+        let reply = usage["completion_tokens"].as_u64();
+        self.reply_tokens = match (self.requests, self.reply_tokens, reply) {
+            (1, _, reply) => reply,
+            (_, Some(so_far), Some(more)) => Some(so_far + more),
+            _ => None,
+        };
+    }
+}
+
+impl fmt::Display for Stats {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.prompt_tokens {
+            Some(tokens) => write!(f, "prompt {tokens} tokens")?,
+            None => write!(f, "prompt {} characters", self.prompt_chars)?,
+        }
+        let seconds = self.writing.as_secs_f64();
+        if let Some(tokens) = self.reply_tokens {
+            write!(f, ", reply {tokens} tokens")?;
+            if seconds > 0.0 {
+                write!(f, " at {:.1} tokens/s", tokens as f64 / seconds)?;
+            }
+        }
+        write!(f, ", {:.1} s to the first token", self.waiting.as_secs_f64())?;
+        write!(f, ", {:.1} s in all", (self.waiting + self.writing).as_secs_f64())?;
+        if self.requests > 1 {
+            write!(f, " over {} requests", self.requests)?;
+        }
+        Ok(())
+    }
 }
 
 pub fn message(role: &str, content: &str) -> Value {
@@ -185,6 +245,7 @@ fn request(
     tools: &[Value],
     max_tokens: u32,
     events: &mut dyn Events,
+    stats: &mut Stats,
 ) -> Result<(String, Vec<Value>), Box<dyn Error>> {
     let config = config::get();
     let url = URL.get().unwrap_or(&config.url);
@@ -192,6 +253,8 @@ fn request(
         "messages": messages,
         "max_tokens": max_tokens,
         "stream": true,
+        // Ask for token counts in a last chunk, for the stats line.
+        "stream_options": { "include_usage": true },
         // mlx-lm batches any request that has no seed, and its batch cache breaks
         // some models (gemma-3n hangs the server). A seed keeps us on the plain
         // path. Other servers take it as the usual sampling seed.
@@ -213,6 +276,9 @@ fn request(
     if !config.token.is_empty() {
         post = post.header("Authorization", format!("Bearer {}", config.token));
     }
+    stats.requests += 1;
+    stats.prompt_chars = messages.iter().map(|m| m["content"].as_str().map_or(0, str::len)).sum();
+    let sent = Instant::now();
     let mut response = post
         .send_json(&body)
         .map_err(|e| format!("no answer from the model server at {url}: {e}"))?;
@@ -226,6 +292,8 @@ fn request(
 
     let mut reply = String::new();
     let mut calls = Vec::new();
+    let mut first = None;
+    let mut usage = Value::Null;
     for line in BufReader::new(response.body_mut().as_reader()).lines() {
         let line = line?;
         let Some(data) = line.strip_prefix("data: ") else { continue };
@@ -233,7 +301,13 @@ fn request(
             break;
         }
         let mut chunk: Value = serde_json::from_str(data)?;
-        let delta = &mut chunk["choices"][0]["delta"];
+        if chunk["usage"].is_object() {
+            usage = chunk["usage"].take();
+        }
+        // The usage chunk has no choices, and indexing into an empty list
+        // to change it would panic.
+        let Some(delta) = chunk.pointer_mut("/choices/0/delta") else { continue };
+        first.get_or_insert_with(Instant::now);
         if let Some(text) = delta["content"].as_str() {
             events.text(text)?;
             reply.push_str(text);
@@ -242,6 +316,10 @@ fn request(
             merge_calls(&mut calls, pieces);
         }
     }
+    let first = first.unwrap_or_else(Instant::now);
+    stats.waiting += first - sent;
+    stats.writing += first.elapsed();
+    stats.count(&usage);
     events.reply_end()?;
     Ok((reply, calls))
 }
@@ -257,6 +335,7 @@ pub fn run(
     let mut made = Vec::new();
     let (mut count, mut told) = (0, false);
     let mut step = 0;
+    let mut stats = Stats::default();
     loop {
         let exhausted = step >= max_steps || count >= max_calls;
         let offered = if exhausted { &[] } else { tools };
@@ -266,10 +345,10 @@ pub fn run(
             messages.push(message("user", "You have no tool calls left. Answer the question now, from what you have read."));
             told = true;
         }
-        let (reply, mut calls) = request(messages, offered, max_tokens, events)?;
+        let (reply, mut calls) = request(messages, offered, max_tokens, events, &mut stats)?;
         if calls.is_empty() {
             messages.push(message("assistant", &reply));
-            return Ok(Outcome { reply, exhausted });
+            return Ok(Outcome { reply, exhausted, stats });
         }
         for (n, call) in calls.iter_mut().enumerate() {
             if !call["id"].is_string() {
@@ -328,5 +407,24 @@ mod tests {
         assert_eq!(calls[0]["function"]["name"], "read_file");
         assert_eq!(calls[0]["function"]["arguments"], "{\"path\":\"a.txt\"}");
         assert_eq!(calls[0]["id"], "c");
+    }
+
+    #[test]
+    fn stats_add_up_over_a_turn() {
+        let mut stats = Stats { requests: 1, prompt_chars: 900, ..Stats::default() };
+        stats.count(&json!({ "prompt_tokens": 300, "completion_tokens": 20 }));
+        stats.requests += 1;
+        stats.count(&json!({ "prompt_tokens": 500, "completion_tokens": 40 }));
+        stats.waiting = Duration::from_millis(500);
+        stats.writing = Duration::from_secs(2);
+        assert_eq!(
+            stats.to_string(),
+            "prompt 500 tokens, reply 60 tokens at 30.0 tokens/s, 0.5 s to the first token, 2.5 s in all over 2 requests"
+        );
+
+        // A server that reports no counts: characters instead, and no speed.
+        let mut stats = Stats { requests: 1, prompt_chars: 900, ..Stats::default() };
+        stats.count(&Value::Null);
+        assert_eq!(stats.to_string(), "prompt 900 characters, 0.0 s to the first token, 0.0 s in all");
     }
 }
