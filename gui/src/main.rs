@@ -262,6 +262,9 @@ struct Nibble {
     chats: Vec<Entry>,
     /// Each finished turn's stats line, by turn. Not saved with the chat.
     stats: HashMap<usize, String>,
+    /// How much of the room for the conversation the last turn took, from
+    /// 0 to 1: once full, the oldest messages are left out.
+    context: Option<f32>,
     scroll: ScrollHandle,
     /// Set while a reply is arriving. Raising the flag stops it.
     running: Option<Arc<AtomicBool>>,
@@ -297,6 +300,7 @@ impl Nibble {
             texts: HashMap::new(),
             chats: store::list(),
             stats: HashMap::new(),
+            context: None,
             scroll: ScrollHandle::new(),
             running: None,
             epoch: 0,
@@ -476,6 +480,9 @@ impl Nibble {
                 if let Some(line) = stats_line(&stats) {
                     self.stats.insert(self.chat.turns.len() - 1, line);
                 }
+                if let (Some(used), Some(room)) = (stats["prompt_chars"].as_f64(), stats["input_chars"].as_f64()) {
+                    self.context = (room > 0.).then(|| (used / room).min(1.) as f32);
+                }
             }
         }
         self.scroll.scroll_to_bottom();
@@ -515,6 +522,7 @@ impl Nibble {
         self.chat = chat;
         self.texts.clear();
         self.stats.clear();
+        self.context = None;
         self.view = View::Chat;
         self.scroll.scroll_to_bottom();
         window.focus(&self.input.focus_handle(cx));
@@ -781,6 +789,26 @@ fn stats_line(stats: &Value) -> Option<String> {
     Some(line)
 }
 
+/// How full the conversation is: a short bar and a percentage. Ochre when
+/// nearly full, since past that the oldest messages are left out.
+fn context_meter(used: f32, theme: &Theme) -> impl IntoElement {
+    let colour = if used >= 0.85 { theme.ochre } else { theme.blue };
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .w(px(48.))
+                .h(px(5.))
+                .rounded_full()
+                .bg(theme.box_line.opacity(0.6))
+                .child(div().h_full().rounded_full().w(px(48. * used)).bg(colour)),
+        )
+        .child(SharedString::from(format!("{:.0}% of context", used * 100.)))
+}
+
 fn capital(word: &str) -> String {
     let mut chars = word.chars();
     chars.next().map_or(String::new(), |first| first.to_uppercase().chain(chars).collect())
@@ -962,6 +990,7 @@ impl Nibble {
                 bar.child(div().min_w_0().truncate().text_color(theme.rose).child(error))
             })
             .child(div().flex_1())
+            .when_some(self.context, |bar, used| bar.child(context_meter(used, theme)))
             .child(div().flex_shrink_0().child("⌘N new chat"))
             .child(
                 div()

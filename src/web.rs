@@ -183,7 +183,12 @@ fn chat_turn(client: &mut TcpStream, request: &Request) -> io::Result<()> {
     write!(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")?;
     let mut stream = Stream(client);
     match chat::run(&mut messages, &tools, config::get().max_tokens, &mut stream) {
-        Ok(outcome) => stream.send(json!({ "done": true, "stats": outcome.stats.to_json() })),
+        Ok(outcome) => {
+            // With the room there is, so a client can show how full the chat is.
+            let mut stats = outcome.stats.to_json();
+            stats["input_chars"] = config::get().input_chars.into();
+            stream.send(json!({ "done": true, "stats": stats }))
+        }
         Err(e) => stream.send(json!({ "error": e.to_string() })),
     }
 }

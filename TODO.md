@@ -85,7 +85,9 @@
   loaded (`GET /info` has `state`), and while it loads the turn says
   "Loading the model…" in place of "Thinking…". Under each reply is the
   stats line the command line prints; `/chat` sends the numbers with its
-  `done` event. Stats are not saved with the chat.
+  `done` event, with `input_chars`, so the status bar also shows how full
+  the conversation is ("41% of context", ochre from 85%, past which the
+  oldest messages are left out). Stats are not saved with the chat.
 
 ## Roadmap
 
