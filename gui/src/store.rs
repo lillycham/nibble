@@ -13,11 +13,19 @@ pub enum Part {
 }
 
 pub struct Turn {
+    /// What the model was sent.
     pub user: String,
+    /// What was typed, when it was a command such as "/summarise some text".
+    pub typed: Option<String>,
     pub parts: Vec<Part>,
 }
 
 impl Turn {
+    /// What the turn shows as its heading: what was typed.
+    pub fn asked(&self) -> &str {
+        self.typed.as_deref().unwrap_or(&self.user)
+    }
+
     /// The model's words in this turn, without the tool lines.
     pub fn answer(&self) -> String {
         self.parts.iter().filter_map(|part| if let Part::Text(text) = part { Some(text.as_str()) } else { None }).collect()
@@ -55,7 +63,7 @@ impl Chat {
     }
 
     pub fn title(&self) -> String {
-        let first = self.turns.first().map_or("", |turn| turn.user.as_str());
+        let first = self.turns.first().map_or("", Turn::asked);
         let line = first.lines().next().unwrap_or_default().trim();
         let title: String = line.chars().take(60).collect();
         if title.is_empty() { "New chat".to_string() } else { title }
@@ -75,7 +83,11 @@ impl Chat {
                         Part::Error(error) => json!({ "error": error }),
                     })
                     .collect();
-                json!({ "user": turn.user, "parts": parts })
+                let mut saved = json!({ "user": turn.user, "parts": parts });
+                if let Some(typed) = &turn.typed {
+                    saved["typed"] = json!(typed);
+                }
+                saved
             })
             .collect();
         json!({ "title": self.title(), "turns": turns })
@@ -89,6 +101,7 @@ impl Chat {
             .flatten()
             .map(|turn| Turn {
                 user: text(&turn["user"]),
+                typed: turn["typed"].as_str().map(str::to_string),
                 parts: turn["parts"]
                     .as_array()
                     .into_iter()
@@ -164,6 +177,7 @@ mod tests {
             id: "42".into(),
             turns: vec![Turn {
                 user: "What is in src?\nSecond line".into(),
+                typed: None,
                 parts: vec![Part::Tool("list_dir src".into()), Part::Text("main.rs".into()), Part::Error("oops".into())],
             }],
         };
@@ -173,5 +187,11 @@ mod tests {
         assert_eq!(back.turns[0].answer(), "main.rs");
         assert_eq!(back.turns[0].parts.len(), 3);
         assert!(file("../escape").is_none());
+
+        // A command keeps what was typed, and shows it.
+        let mut chat = back;
+        chat.turns[0].typed = Some("/summarise src".into());
+        let back = Chat::from_json("42", &chat.to_json());
+        assert_eq!((back.title().as_str(), back.turns[0].user.as_str()), ("/summarise src", "What is in src?\nSecond line"));
     }
 }

@@ -13,6 +13,21 @@ rests on, each on a line of its own, in this form:\n> path: the exact text of th
 line exactly as it is in the file, and quote only lines you have read. If nothing you read \
 supports the answer, say so and quote nothing.";
 
+/// The files attached to a message, each in a <file path="..."> block as
+/// `-f` and the window write them, as (path, text).
+pub fn attached(message: &str) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    let mut rest = message;
+    while let Some(at) = rest.find("<file path=\"") {
+        rest = &rest[at + "<file path=\"".len()..];
+        let Some((path, after)) = rest.split_once("\">\n") else { break };
+        let Some((text, after)) = after.split_once("\n</file>") else { break };
+        files.push((path.to_string(), text.to_string()));
+        rest = after;
+    }
+    files
+}
+
 /// One quote from a reply.
 #[derive(Debug, PartialEq)]
 pub struct Quote {
@@ -36,6 +51,7 @@ impl Quote {
 /// Where the quotes may come from: the texts the model was given whole (the
 /// attached files, the piped input), and, when it had file tools, any file
 /// those tools could have read.
+#[derive(Clone)]
 pub struct Sources {
     given: Vec<(String, String)>,
     files: bool,
@@ -226,6 +242,10 @@ mod tests {
         let why: Vec<_> = check.missing.iter().map(|(_, why)| why.as_str()).collect();
         assert_eq!(why, ["not in the file", "not a file it was given"]);
         assert!(check.report().starts_with("2 of 3 quotes not found:\n  a.txt: let budget = 7000;"));
+
+        let message = "what is this\n\n<file path=\"a.txt\">\none\ntwo\n</file>\n\n<file path=\"b\">\n3\n</file>";
+        assert_eq!(attached(message), [("a.txt".to_string(), "one\ntwo".to_string()), ("b".to_string(), "3".to_string())]);
+        assert!(attached("no files").is_empty());
 
         // One text and no tools: a quote without a path can only mean that one.
         assert_eq!(super::check("> run(budget);", &sources).found.len(), 1);

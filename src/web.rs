@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use serde_json::{json, Value};
 
 use crate::chat::{self, message};
+use crate::quotes::{self, Sources};
 use crate::{config, tools};
 
 const PAGE: &str = include_str!("chat.html");
@@ -133,6 +134,8 @@ pub fn respond(client: &mut TcpStream, status: &str, kind: &str, body: &[u8]) ->
 
 /// A chat turn as server-sent events: {"text"} as the reply grows, {"tool"}
 /// for each tool call, then {"done"} with the turn's stats, or {"error"}.
+/// The request may name a "recipe" whose settings apply to the turn, and ask
+/// for "quote": then {"done"} says which quotes were found in the files.
 struct Stream<'a>(&'a mut TcpStream);
 
 impl Stream<'_> {
@@ -157,17 +160,37 @@ fn chat_turn(client: &mut TcpStream, request: &Request) -> io::Result<()> {
         Ok(body) => body,
         Err(e) => return respond(client, "400 Bad Request", "text/plain", format!("bad JSON: {e}\n").as_bytes()),
     };
+    // A recipe's settings apply to this turn; the client has already put its
+    // prompt in the message, so the history it sends next reads the same.
+    let recipe = match body["recipe"].as_str() {
+        None => None,
+        Some(name) => match config::get().recipe(name) {
+            Some(recipe) => Some(recipe),
+            None => return respond(client, "400 Bad Request", "text/plain", format!("no recipe called \"{name}\"\n").as_bytes()),
+        },
+    };
     // A client turns them off for a chat with files attached, as `-f` does:
     // the files are the whole task.
-    let use_tools = tools_allowed() && body["tools"].as_bool() != Some(false);
+    let use_tools = tools_allowed() && body["tools"].as_bool() != Some(false) && recipe.and_then(|r| r.tools) != Some(false);
     // No ask_claude here: a remote chat should not be able to spend Claude
     // usage on this machine.
     let tools = if use_tools { tools::schemas(false) } else { Vec::new() };
-    let mut system = chat::system().to_string();
-    if use_tools {
-        system += &chat::system_tools();
-        system += &tools::context();
+    let mut system = match recipe.and_then(|r| r.system.as_deref()) {
+        Some(system) => system.to_string(),
+        None => {
+            let mut system = chat::system().to_string();
+            if use_tools {
+                system += &chat::system_tools();
+                system += &tools::context();
+            }
+            system
+        }
+    };
+    let quote = body["quote"].as_bool() == Some(true) || recipe.is_some_and(|r| r.quote);
+    if quote {
+        system += quotes::SYSTEM_QUOTE;
     }
+    let max_tokens = recipe.and_then(|r| r.max_tokens).unwrap_or(config::get().max_tokens);
 
     // The client keeps the history and sends it each time. Take only its user
     // and assistant turns, so the system prompt stays ours.
@@ -180,16 +203,32 @@ fn chat_turn(client: &mut TcpStream, request: &Request) -> io::Result<()> {
     if messages.last().is_none_or(|last| last["role"] != "user") {
         return respond(client, "400 Bad Request", "text/plain", b"the last message must be from the user\n");
     }
+    // Quotes may come from the files attached anywhere in the chat, and from
+    // the files the tools can read.
+    let sources = quote.then(|| {
+        let mut sources = Sources::new(use_tools);
+        for turn in messages.iter().filter(|m| m["role"] == "user") {
+            for (path, text) in quotes::attached(turn["content"].as_str().unwrap_or_default()) {
+                sources.give(&path, &text);
+            }
+        }
+        sources
+    });
     chat::trim(&mut messages);
 
     write!(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")?;
     let mut stream = Stream(client);
-    match chat::run(&mut messages, &tools, config::get().max_tokens, &mut stream) {
+    match chat::run(&mut messages, &tools, max_tokens, &mut stream) {
         Ok(outcome) => {
             // With the room there is, so a client can show how full the chat is.
             let mut stats = outcome.stats.to_json();
             stats["input_chars"] = config::get().input_chars.into();
-            stream.send(json!({ "done": true, "stats": stats }))
+            let mut done = json!({ "done": true, "stats": stats });
+            if let Some(sources) = &sources {
+                let check = quotes::check(&outcome.reply, sources);
+                done["quotes"] = json!({ "found": check.found.len(), "missing": check.missing.len(), "report": check.report() });
+            }
+            stream.send(done)
         }
         Err(e) => stream.send(json!({ "error": e.to_string() })),
     }

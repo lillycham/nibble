@@ -11,7 +11,58 @@ let
     lib.optionalAttrs (cfg.model != null) { inherit (cfg) model; }
     # A full path, because a launchd agent has almost nothing on its PATH.
     // lib.optionalAttrs (cfg.serverPackage != null) { server_command = lib.getExe cfg.serverPackage; }
+    // lib.optionalAttrs (cfg.recipes != { }) { recipes = lib.mapAttrs (_: recipeSettings) cfg.recipes; }
     // cfg.settings;
+
+  # Unset options stay out of the file, so the defaults apply. A recipe set
+  # to null removes the built-in one of that name.
+  recipeSettings = recipe: if recipe == null then null else lib.filterAttrs (_: value: value != null) recipe;
+
+  recipe = lib.types.submodule {
+    options = {
+      description = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "One line for the list of commands.";
+      };
+      prompt = lib.mkOption {
+        type = lib.types.str;
+        description = ''
+          What is sent. The text given with the command goes where `{input}`
+          is, or after the prompt when there is no `{input}`.
+        '';
+      };
+      system = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "A system prompt to use in place of the usual one.";
+      };
+      max_tokens = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        description = "The reply length limit for this recipe.";
+      };
+      tools = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Set to false to keep the model from reading files.";
+      };
+      quote = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Have the model quote the lines its answer rests on, and check them.";
+      };
+      command = lib.mkOption {
+        type = lib.types.nullOr (lib.types.listOf lib.types.str);
+        default = null;
+        example = [ "git" "diff" "--staged" ];
+        description = ''
+          A program and its arguments, run in the current directory when the
+          recipe is given no text on the command line: its output is the input.
+        '';
+      };
+    };
+  };
   configFile = json.generate "nibble-config.json" settings;
 in
 {
@@ -60,6 +111,27 @@ in
       type = lib.types.bool;
       default = false;
       description = "Install nibble-gui, the native chat window. macOS only for now.";
+    };
+
+    recipes = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.nullOr recipe);
+      default = { };
+      example = lib.literalExpression ''
+        {
+          review = {
+            description = "Look over a diff for mistakes";
+            prompt = "List the bugs in this diff, most serious first:\n{input}";
+            command = [ "git" "diff" ];
+            tools = false;
+          };
+          commit = null; # remove a built-in one
+        }
+      '';
+      description = ''
+        Named prompts with settings of their own. Each is `/NAME` in the chat
+        and the window, and `nibble NAME` on the command line. `summarise` and
+        `commit` are built in.
+      '';
     };
 
     settings = lib.mkOption {

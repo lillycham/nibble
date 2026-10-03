@@ -13,7 +13,8 @@ use crate::chat::{self, message, Events};
 
 pub struct Session {
     pub id: String,
-    /// As saved: `{"user", "parts": [{"text"} | {"tool"} | {"error"}]}`.
+    /// As saved: `{"user", "parts": [{"text"} | {"tool"} | {"error"}]}`, and
+    /// "typed" for a command: what was typed, where "user" is what was sent.
     pub turns: Vec<Value>,
 }
 
@@ -60,7 +61,8 @@ impl Session {
     }
 
     pub fn title(&self) -> String {
-        let first = self.turns.first().and_then(|turn| turn["user"].as_str()).unwrap_or_default();
+        // A command shows as it was typed, not as the prompt it became.
+        let first = self.turns.first().and_then(|turn| turn["typed"].as_str().or(turn["user"].as_str())).unwrap_or_default();
         let line = first.lines().next().unwrap_or_default().trim();
         let title: String = line.chars().take(60).collect();
         if title.is_empty() { "New chat".to_string() } else { title }
@@ -90,6 +92,13 @@ impl Session {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let saved = json!({ "title": self.title(), "turns": self.turns });
         fs::write(&path, format!("{saved:#}\n")).map_err(|e| format!("{}: {e}", path.display()).into())
+    }
+
+    /// Remove the saved copy, if there is one.
+    pub fn forget(&self) {
+        if let Some(path) = file(&self.id) {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
