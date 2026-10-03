@@ -47,6 +47,9 @@
   mlx_lm.server load another one (from Hugging Face or anywhere). Each
   connection carries one request, and chunked bodies are refused, so nothing
   passes unchecked.
+- `nibble mcp` asks `nibble serve` for its model before each `tools/list` and
+  `tools/call`, and loads that model's presets when it has changed, so a switch
+  needs no restart. `NIBBLE_MODEL` pins it.
 
 ## Next
 
@@ -63,9 +66,6 @@
   already say when delegation is worth it.
 
 ## Later
-
-- `nibble mcp` reads the model's presets once, when it starts. After a model
-  switch it keeps the old model's presets until Claude restarts it.
 
 - Stats line per turn: prompt size, tokens, speed.
 - `-f FILE` to attach files without a tool round.

@@ -208,9 +208,9 @@ fn served_model(url: &str) -> Option<String> {
     info["model"].as_str().map(str::to_string)
 }
 
-/// `flag_model` is a model named on the command line. `ask_server` says
-/// whether to ask the server for its model when nothing else names one.
-fn load(flag_model: Option<String>, ask_server: bool) -> Result<Config, String> {
+/// `flag_model` is a model named on the command line. `ask_server` is given
+/// the server's address, and names the model it runs when nothing else does.
+fn load(flag_model: Option<String>, ask_server: impl FnOnce(&str) -> Option<String>) -> Result<Config, String> {
     let mut file = serde_json::Map::new();
     let mut source = String::new();
     if let Some(path) = path() {
@@ -231,9 +231,9 @@ fn load(flag_model: Option<String>, ask_server: bool) -> Result<Config, String> 
     // A running server knows better than the "model" setting, which only says
     // what it starts with: it may have switched since.
     let mut model = flag_model.clone().or_else(|| var("NIBBLE_MODEL")).unwrap_or_default();
-    if model.is_empty() && ask_server {
+    if model.is_empty() {
         let url = var("NIBBLE_URL").or_else(|| setting("url")).unwrap_or_else(|| Config::default().url);
-        model = served_model(&url).unwrap_or_default();
+        model = ask_server(&url).unwrap_or_default();
     }
     if model.is_empty() {
         model = setting("model").unwrap_or_default();
@@ -293,14 +293,39 @@ pub fn init(flag_model: Option<String>, ask_server: bool) -> Result<(), String> 
     if CONFIG.read().unwrap().is_some() {
         return Err("config loaded twice".into());
     }
-    set(load(flag_model, ask_server)?);
+    set(load(flag_model, |url| if ask_server { served_model(url) } else { None })?);
     Ok(())
 }
 
 /// Load the settings again for another model, so its presets apply.
 pub fn switch(model: &str) -> Result<(), String> {
-    set(load(Some(model.to_string()), false)?);
+    set(load(Some(model.to_string()), |_| None)?);
     Ok(())
+}
+
+/// For a process that outlives a model switch, such as `nibble mcp`: ask the
+/// server which model it runs now, and if that is another one, load the
+/// settings again so its presets apply. Says which model it changed to.
+/// A model named in NIBBLE_MODEL stays, and so does everything when the
+/// server can't say.
+pub fn refresh() -> Result<Option<String>, String> {
+    if std::env::var("NIBBLE_MODEL").is_ok_and(|model| !model.is_empty()) {
+        return Ok(None);
+    }
+    let Some(served) = served_model(&get().url) else { return Ok(None) };
+    let Some(config) = reload(get(), &served)? else { return Ok(None) };
+    let name = config.model_name.clone();
+    set(config);
+    Ok(Some(name))
+}
+
+/// The settings for `served`, or None when that is the model they are for.
+fn reload(current: &Config, served: &str) -> Result<Option<Config>, String> {
+    let name = served.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
+    if name.is_empty() || name == current.model_name {
+        return Ok(None);
+    }
+    load(None, |_| Some(served.to_string())).map(Some)
 }
 
 /// The settings. Tests never call `init`, so they get the defaults.
@@ -334,5 +359,51 @@ mod tests {
                 config.set(key, value).unwrap();
             }
         }
+    }
+
+    /// A stand-in for `nibble serve` that answers every request with its /info.
+    fn fake_server(model: &str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let body = json!({ "model": model }).to_string();
+        std::thread::spawn(move || {
+            for mut client in listener.incoming().flatten() {
+                let _ = client.read(&mut [0; 4096]);
+                let head = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                let _ = client.write_all((head + &body).as_bytes());
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_model_switch_brings_its_presets() {
+        // The only test that reads the config file, so pointing it elsewhere
+        // can't disturb the others.
+        let file = std::env::temp_dir().join(format!("nibble-test-{}.json", std::process::id()));
+        std::fs::write(&file, r#"{ "max_tokens": 500, "models": { "qwen3": { "max_calls": 3 } } }"#).unwrap();
+        std::env::set_var("NIBBLE_CONFIG", &file);
+
+        let url = fake_server("LFM2.5-2.6B-8bit");
+        assert_eq!(served_model(&url).as_deref(), Some("LFM2.5-2.6B-8bit"));
+        let qwen = load(None, |_| Some("/models/Qwen3-4B-Instruct-4bit/".to_string())).unwrap();
+        assert_eq!((qwen.model_name.as_str(), qwen.max_calls, qwen.prompt.as_str()), ("Qwen3-4B-Instruct-4bit", 3, "firm"));
+
+        // The server has switched: the built-in preset for the new model
+        // applies, the old model's section in the file no longer does, and
+        // the file's other settings stay.
+        let lfm = reload(&qwen, &served_model(&url).unwrap()).unwrap().expect("another model");
+        assert_eq!(lfm.model_name, "LFM2.5-2.6B-8bit");
+        assert_eq!((lfm.prompt.as_str(), lfm.max_calls, lfm.result_chars, lfm.max_tokens), ("light", 6, 4000, 500));
+
+        // Asked again with no switch, it keeps what it has.
+        assert!(reload(&lfm, "LFM2.5-2.6B-8bit").unwrap().is_none());
+        assert!(reload(&lfm, "").unwrap().is_none());
+
+        // A config file gone bad is an error, not a silent return to defaults.
+        std::fs::write(&file, "{ not json").unwrap();
+        assert!(reload(&lfm, "gemma-3n-E4B").is_err());
+        std::fs::remove_file(&file).unwrap();
     }
 }
