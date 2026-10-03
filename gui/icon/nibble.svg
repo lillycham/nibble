@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- nibble's app icon: a paper tile with a bite out of one corner, and a
+       slab-serif "n" in the window's slate blue. Shapes only, no fonts, so
+       it renders the same anywhere. The tile follows Apple's icon grid:
+       824 x 824 at (100, 100), corner radius 185. -->
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f1f0ec"/>
+    </linearGradient>
+    <mask id="bite">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="898" cy="126" r="150" fill="#000"/>
+      <circle cx="748" cy="96" r="74" fill="#000"/>
+      <circle cx="928" cy="276" r="74" fill="#000"/>
+    </mask>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <g mask="url(#bite)">
+      <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#paper)"/>
+      <rect x="102" y="102" width="820" height="820" rx="183" fill="none" stroke="#dcdcd6" stroke-width="4"/>
+    </g>
+  </g>
+  <g fill="#4f6285">
+    <rect x="352" y="330" width="76" height="380"/>
+    <rect x="300" y="330" width="128" height="36"/>
+    <rect x="300" y="674" width="180" height="36"/>
+    <rect x="544" y="674" width="180" height="36"/>
+  </g>
+  <path d="M390 476 C390 404 458 362 536 362 C612 362 634 410 634 482 L634 700"
+        fill="none" stroke="#4f6285" stroke-width="76"/>
+</svg>

@@ -87,6 +87,9 @@
   input, or a file the model's tools could read (same confinement). Spacing
   and `...` are forgiven; anything else not in the file is reported after the
   answer. Opt-in, since the request costs about 80 tokens.
+- An app icon: a paper tile with a bite out of one corner and a slab "n" in
+  the window's slate blue. Drawn in `gui/icon/nibble.svg`; Nix turns it into
+  the bundle's `nibble.icns`.
 
 ## Roadmap
 
@@ -118,7 +121,6 @@ and `-f FILE`.
 - A selection in a reply stays inside one block (a run of text or a code
   block). Selecting across blocks would need one text element for the whole
   reply; until then, Copy takes all of it.
-- An app icon.
 - Model state in the status bar: idle, loading or loaded. A cold start is the
   slow part, and today it looks like a hang.
 - Stats line per turn in the window, as the command line has.

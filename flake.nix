@@ -80,6 +80,18 @@
           exec ${env}/bin/mlx_lm.server "$@"
         '';
 
+      # The window's icon, drawn in gui/icon/nibble.svg and turned into the
+      # .icns file an app bundle wants, at every size macOS asks for.
+      appIcon = pkgs: pkgs.runCommand "nibble-icon" {
+        nativeBuildInputs = [ pkgs.librsvg pkgs.libicns ];
+      } ''
+        for n in 16 32 128 256 512 1024; do
+          rsvg-convert -w $n -h $n ${./gui/icon/nibble.svg} -o icon_$n.png
+        done
+        mkdir $out
+        png2icns $out/nibble.icns icon_*.png
+      '';
+
       appleSilicon = pkgs: pkgs.stdenv.hostPlatform.isDarwin && pkgs.stdenv.hostPlatform.isAarch64;
     in
     {
@@ -122,7 +134,8 @@
           # Spotlight can find it. bin/nibble-gui stays, as a link into it.
           postInstall = ''
             app=$out/Applications/nibble.app/Contents
-            mkdir -p $app/MacOS
+            mkdir -p $app/MacOS $app/Resources
+            cp ${appIcon pkgs}/nibble.icns $app/Resources/nibble.icns
             mv $out/bin/nibble-gui $app/MacOS/nibble-gui
             ln -s $app/MacOS/nibble-gui $out/bin/nibble-gui
             cat > $app/Info.plist <<EOF
@@ -134,6 +147,7 @@
               <key>CFBundleDisplayName</key><string>nibble</string>
               <key>CFBundleIdentifier</key><string>com.lillycham.nibble</string>
               <key>CFBundleExecutable</key><string>nibble-gui</string>
+              <key>CFBundleIconFile</key><string>nibble</string>
               <key>CFBundlePackageType</key><string>APPL</string>
               <key>CFBundleShortVersionString</key><string>0.1.0</string>
               <key>CFBundleVersion</key><string>0.1.0</string>
