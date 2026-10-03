@@ -612,8 +612,22 @@ mod tests {
         }
     }
 
+    /// A port for the model server, with nothing listening on it. Never found
+    /// by binding a listener and closing it again: the port can be handed to
+    /// the next socket any test opens, and a child that another test is just
+    /// starting holds a copy of the listener until it execs, which makes the
+    /// port look taken. So take ports below the range the system hands out
+    /// (32768 up on Linux, 49152 up on macOS), different for each test run,
+    /// and check them by connecting.
     fn free_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        let base = 20_000 + (std::process::id() % 1000) as u16 * 10;
+        loop {
+            let port = base + NEXT.fetch_add(1, Ordering::SeqCst);
+            if TcpStream::connect(("127.0.0.1", port)).is_err() {
+                return port;
+            }
+        }
     }
 
     /// Send one raw request through `handle` and return the whole response.
