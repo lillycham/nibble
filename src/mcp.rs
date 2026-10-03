@@ -12,6 +12,7 @@ use std::time::Instant;
 use serde_json::{json, Value};
 
 use crate::chat::{self, message};
+use crate::quotes::{self, Sources};
 use crate::{config, tools};
 
 pub const USAGE: &str = "usage: nibble mcp [--root DIR]...
@@ -50,10 +51,11 @@ fn tool_list() -> Value {
             "description": "Give one small, self-contained task to a local model. With `paths`, the \
                 model is shown those whole files and nothing else. Without `paths`, it can read and \
                 search files itself. Returns a status (ok, too_large, too_hard, error), what it read, \
-                and a short answer.",
+                and a short answer. With `quote`, the model also quotes the lines its answer rests on, \
+                and each quote is checked against the file, which catches invented answers.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "task": { "type": "string" }, "paths": paths },
+                "properties": { "task": { "type": "string" }, "paths": paths, "quote": { "type": "boolean" } },
                 "required": ["task"],
             },
         },
@@ -133,12 +135,14 @@ fn delegate(args: &Value) -> Result<Report, Report> {
     let config = config::get();
     let task = text_arg(args, "task")?;
     let paths = paths_arg(args);
+    let quote = args["quote"].as_bool().unwrap_or(false);
+    let evidence = if quote { quotes::SYSTEM_QUOTE } else { "" };
 
     if paths.is_empty() {
         if !config.tools {
             return Err(Report::error("this model has no tools, so it can't look for files itself; pass `paths`"));
         }
-        let system = format!("{}{}{TOO_HARD}{}", chat::system(), chat::system_tools(), tools::context());
+        let system = format!("{}{}{TOO_HARD}{evidence}{}", chat::system(), chat::system_tools(), tools::context());
         let mut messages = vec![message("system", &system), message("user", task)];
         let outcome = chat::run(&mut messages, &tools::schemas(false), config.max_tokens, &mut chat::Quiet)
             .map_err(Report::error)?;
@@ -155,17 +159,23 @@ fn delegate(args: &Value) -> Result<Report, Report> {
             })
             .collect();
         let used = if used.is_empty() { "none".to_string() } else { used.join("; ") };
-        return Ok(judge(outcome, vec![format!("tools used: {used}")]));
+        let mut notes = vec![format!("tools used: {used}")];
+        if quote {
+            notes.push(format!("quotes: {}", quotes::check(&outcome.reply, &Sources::new(true)).report()));
+        }
+        return Ok(judge(outcome, notes));
     }
 
     let mut user = task.to_string();
     let mut sizes = Vec::new();
     let mut read = Vec::new();
+    let mut sources = Sources::new(false);
     for path in &paths {
         let text = tools::resolve(path).and_then(|real| tools::read_text(&real)).map_err(Report::error)?;
         sizes.push(format!("{path}: {} characters", text.len()));
         read.push(format!("{path} ({} lines, complete)", text.lines().count()));
         user += &attach(path, &text);
+        sources.give(path, &text);
     }
     // Refuse before the model runs: an answer from half a file would look
     // just as confident as one from the whole of it.
@@ -175,10 +185,14 @@ fn delegate(args: &Value) -> Result<Report, Report> {
                       the files one at a time.";
         return Ok(Report { status: "too_large", notes: sizes, answer: answer.to_string() });
     }
-    let system = format!("{}{TOO_HARD}", chat::system());
+    let system = format!("{}{TOO_HARD}{evidence}", chat::system());
     let mut messages = vec![message("system", &system), message("user", &user)];
     let outcome = chat::run(&mut messages, &[], config.max_tokens, &mut chat::Quiet).map_err(Report::error)?;
-    Ok(judge(outcome, vec![format!("read: {}", read.join(", "))]))
+    let mut notes = vec![format!("read: {}", read.join(", "))];
+    if quote {
+        notes.push(format!("quotes: {}", quotes::check(&outcome.reply, &sources).report()));
+    }
+    Ok(judge(outcome, notes))
 }
 
 fn map(args: &Value) -> Result<Report, Report> {

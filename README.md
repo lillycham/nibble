@@ -9,6 +9,7 @@ command-line program is about 1 MB with two dependencies.
 git diff | nibble "Write a commit message for this diff."
 nibble "Which nixpkgs branch does the flake use?"
 nibble -f flake.nix "What does this flake build?"
+nibble -q "Where is the idle timeout set?"   # with quotes that are checked
 nibble            # a chat
 nibble -c         # go on with the last chat
 ```
@@ -18,13 +19,15 @@ nibble -c         # go on with the last chat
 - **`nibble`**: one-shot questions, piped input, and a chat. The model can read
   and search files in the current directory, and nothing else. It can't change
   anything. Chats are saved and shared with the window: `nibble chats` lists
-  them, and `-c` or `-r ID` goes on with one.
+  them, and `-c` or `-r ID` goes on with one. With `-q`, the model quotes the
+  lines its answer rests on and nibble checks that each one is in the file, so
+  an invented answer shows up as a quote that isn't there.
 - **`nibble serve`**: a proxy in front of the model server. It starts the model
   on the first request and unloads it after an idle period, so the weights only
   hold memory while something is using them. It also serves a chat page at `/`.
 - **`nibble mcp`**: an MCP server, so that Claude can hand small reading tasks
   to the local model. `delegate` gives it one task; `map` asks one question of
-  many files, each in a fresh context.
+  many files, each in a fresh context. `delegate` takes `quote` too.
 - **`ask_claude`**: the other direction. The local model can pass a question
   that is too hard for it to `claude -p`.
 - **`nibble-gui`**: a native chat window, built with GPUI.
