@@ -6,6 +6,7 @@ mod input;
 mod settings;
 mod store;
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,8 +16,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    App, Application, Bounds, Context, Div, Entity, Focusable, Hsla, KeyBinding, ScrollHandle, SharedString, Stateful,
-    TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div,
+    App, Application, Bounds, Context, Div, Entity, Focusable, Hsla, KeyBinding, Pixels, ScrollHandle, SharedString,
+    Stateful, TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div,
     point, prelude::*, px, rgb, size,
 };
 use serde_json::{Map, Value, json};
@@ -36,6 +37,8 @@ const MONO: &str = "Menlo";
 const COLUMN: f32 = 680.;
 const SIDEBAR: f32 = 224.;
 const BAR: f32 = 46.;
+/// The size of the text, everywhere it isn't set smaller.
+const TEXT: f32 = 13.5;
 
 /// After macOS's own look: a grey source list beside the page, one indigo
 /// accent, and your own messages tinted with it.
@@ -223,6 +226,9 @@ struct Nibble {
     view: View,
     input: Entity<TextInput>,
     chat: Chat,
+    /// The open chat's text, read-only so that it can be selected, by turn,
+    /// part and block. A turn's own message is part `usize::MAX`.
+    texts: HashMap<(usize, usize, usize), Entity<TextInput>>,
     chats: Vec<Entry>,
     scroll: ScrollHandle,
     /// Set while a reply is arriving. Raising the flag stops it.
@@ -242,7 +248,7 @@ struct Nibble {
 
 impl Nibble {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new("Ask something small", cx));
+        let input = cx.new(|cx| TextInput::multiline("Ask something small", 10, cx));
         window.focus(&input.focus_handle(cx));
         // Follow the system when it switches between light and dark.
         cx.observe_window_appearance(window, |_, _, cx| cx.notify()).detach();
@@ -256,6 +262,7 @@ impl Nibble {
             view: View::Chat,
             input,
             chat: Chat::new(),
+            texts: HashMap::new(),
             chats: store::list(),
             scroll: ScrollHandle::new(),
             running: None,
@@ -430,6 +437,7 @@ impl Nibble {
         self.stop();
         self.keep();
         self.chat = chat;
+        self.texts.clear();
         self.view = View::Chat;
         self.scroll.scroll_to_bottom();
         window.focus(&self.input.focus_handle(cx));
@@ -586,56 +594,65 @@ impl Nibble {
     }
 }
 
+/// Text that can be selected, kept from one frame to the next so that the
+/// selection is too, and brought up to date as a reply grows.
+fn selectable(
+    texts: &mut HashMap<(usize, usize, usize), Entity<TextInput>>,
+    key: (usize, usize, usize),
+    text: &str,
+    cx: &mut App,
+) -> Entity<TextInput> {
+    let entity = texts.entry(key).or_insert_with(|| cx.new(TextInput::read_only)).clone();
+    entity.update(cx, |input, cx| input.show(text, cx));
+    entity
+}
+
 /// Just enough Markdown for a chat: fenced code gets its own block, with its
 /// language and a button that copies it.
-fn reply(text: &str, id: &str, theme: &Theme) -> impl IntoElement {
-    div().flex().flex_col().gap_3().children(text.split("```").enumerate().filter(|(_, part)| !part.trim().is_empty()).map(
-        |(n, part)| {
-            if n % 2 == 1 {
-                // The first line of a fence is its language tag.
-                let (language, code) = part.split_once('\n').unwrap_or(("", part));
-                let code = code.trim_end().to_string();
-                let shown = SharedString::from(code.clone());
-                let language = if language.trim().is_empty() { "code" } else { language.trim() };
-                div()
-                    .flex()
-                    .flex_col()
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(theme.line)
-                    .bg(theme.code)
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .px_3()
-                            .py(px(5.))
-                            .border_b_1()
-                            .border_color(theme.line)
-                            .text_size(px(11.5))
-                            .text_color(theme.dim)
-                            .child(SharedString::from(language.to_string()))
-                            .child(link(SharedString::from(format!("{id}-code-{n}")), "Copy", theme).on_click(
-                                move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone())),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .font_family(MONO)
-                            .text_size(px(12.))
-                            .line_height(px(19.))
-                            .child(shown),
-                    )
-                    .into_any_element()
-            } else {
-                div().line_height(px(21.)).child(SharedString::from(part.trim().to_string())).into_any_element()
-            }
-        },
-    ))
+fn reply(
+    texts: &mut HashMap<(usize, usize, usize), Entity<TextInput>>,
+    (turn, part): (usize, usize),
+    text: &str,
+    theme: &Theme,
+    cx: &mut App,
+) -> impl IntoElement {
+    let blocks = text.split("```").enumerate().filter(|(_, block)| !block.trim().is_empty()).map(|(n, block)| {
+        if n % 2 == 1 {
+            // The first line of a fence is its language tag.
+            let (language, code) = block.split_once('\n').unwrap_or(("", block));
+            let code = code.trim_end().to_string();
+            let language = if language.trim().is_empty() { "code" } else { language.trim() };
+            let shown = selectable(texts, (turn, part, n), &code, cx);
+            div()
+                .flex()
+                .flex_col()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme.line)
+                .bg(theme.code)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px_3()
+                        .py(px(5.))
+                        .border_b_1()
+                        .border_color(theme.line)
+                        .text_size(px(11.5))
+                        .text_color(theme.dim)
+                        .child(SharedString::from(language.to_string()))
+                        .child(link(SharedString::from(format!("code-{turn}-{part}-{n}")), "Copy", theme).on_click(
+                            move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone())),
+                        )),
+                )
+                .child(div().px_3().py_2().font_family(MONO).text_size(px(12.)).line_height(px(19.)).child(shown))
+        } else {
+            div().line_height(px(21.)).child(selectable(texts, (turn, part, n), block.trim(), cx))
+        }
+    });
+    div().flex().flex_col().gap_3().children(blocks)
 }
 
 /// A tool call as a chip: what the model did, and to what.
@@ -720,6 +737,17 @@ fn title_bar(id: &'static str, theme: &Theme) -> Stateful<Div> {
                 window.titlebar_double_click();
             }
         })
+}
+
+/// How wide `text` is when each of its lines is set on one line.
+fn text_width(text: &str, size: Pixels, window: &Window) -> Pixels {
+    let style = window.text_style();
+    text.lines()
+        .map(|line| {
+            let run = style.to_run(line.len());
+            window.text_system().shape_line(SharedString::from(line.to_string()), size, &[run], None).width
+        })
+        .fold(px(0.), |widest, width| if width > widest { width } else { widest })
 }
 
 /// Centre the content of a pane in a column of readable width.
@@ -866,9 +894,16 @@ impl Nibble {
     }
 
     /// One turn: your message, then what the model did and said.
-    fn turn(&self, n: usize, turn: &Turn, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let last = n + 1 == self.chat.turns.len();
-        let waiting = last && self.running.is_some();
+    /// `waiting` is set on the last turn while its reply is arriving.
+    fn turn(
+        texts: &mut HashMap<(usize, usize, usize), Entity<TextInput>>,
+        n: usize,
+        turn: &Turn,
+        waiting: bool,
+        bubble: Pixels,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
 
         // Tool calls in a row share a line of chips.
         let mut parts: Vec<gpui::AnyElement> = Vec::new();
@@ -883,7 +918,7 @@ impl Nibble {
                 Part::Tool(tool) => chips.push(tool_chip(tool, theme)),
                 Part::Text(text) => {
                     flush(&mut chips, &mut parts);
-                    parts.push(reply(text, &format!("turn-{n}-{k}"), theme).into_any_element());
+                    parts.push(reply(texts, (n, k), text, theme, cx).into_any_element());
                 }
                 Part::Error(error) => {
                     flush(&mut chips, &mut parts);
@@ -907,7 +942,7 @@ impl Nibble {
         }
 
         let answer = turn.answer();
-        // The text can't be selected, so offer the whole reply.
+        // The whole reply at once, code blocks and all.
         let copy = (!waiting && !answer.trim().is_empty()).then(|| {
             link(("copy", n), "Copy reply", theme).on_click(cx.listener(move |_, _, _, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(answer.trim().to_string()));
@@ -921,6 +956,8 @@ impl Nibble {
             .child(
                 div().flex().justify_end().pl_12().child(
                     div()
+                        .w(bubble)
+                        .max_w_full()
                         .bg(theme.user)
                         .text_color(theme.user_fg)
                         .px(px(13.))
@@ -928,14 +965,14 @@ impl Nibble {
                         .rounded(px(16.))
                         .rounded_br(px(5.))
                         .line_height(px(20.))
-                        .child(SharedString::from(turn.user.clone())),
+                        .child(selectable(texts, (n, usize::MAX, 0), &turn.user, cx)),
                 ),
             )
             .children(parts)
             .children(copy.map(|copy| div().flex().child(copy)))
     }
 
-    fn chat_view(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn chat_view(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model = if self.models.current.is_empty() { "a small local model" } else { self.models.current.as_str() };
         let log = if self.chat.turns.is_empty() {
             // Nothing said yet: a quiet welcome in the middle of the pane.
@@ -961,8 +998,20 @@ impl Nibble {
                         .child(SharedString::from(format!("Ask something small. {model} answers through nibble serve."))),
                 )
         } else {
-            let turns: Vec<_> =
-                self.chat.turns.iter().enumerate().map(|(n, turn)| self.turn(n, turn, theme, cx).into_any_element()).collect();
+            let (texts, count, running) = (&mut self.texts, self.chat.turns.len(), self.running.is_some());
+            let turns: Vec<_> = self
+                .chat
+                .turns
+                .iter()
+                .enumerate()
+                .map(|(n, turn)| {
+                    let waiting = running && n + 1 == count;
+                    // The text inside fills the width it is given, so size
+                    // the bubble to the message: its padding and widest line.
+                    let bubble = px(26. + 2.) + text_width(&turn.user, px(TEXT), window);
+                    Self::turn(texts, n, turn, waiting, bubble, theme, cx).into_any_element()
+                })
+                .collect();
             div()
                 .id("log")
                 .flex_1()
@@ -1004,7 +1053,7 @@ impl Nibble {
                     .gap_2()
                     .text_size(px(11.5))
                     .text_color(theme.dim)
-                    .child(if running { "↩ stops the reply" } else { "↩ sends" })
+                    .child(if running { "↩ stops the reply" } else { "↩ sends, ⇧↩ starts a new line" })
                     .child(div().flex_1())
                     .child(
                         div()
@@ -1269,16 +1318,17 @@ impl Nibble {
 impl Render for Nibble {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(window);
-        for input in self.fields.iter().chain([&self.input]) {
+        let main = match self.view {
+            View::Chat => self.chat_view(&theme, window, cx).into_any_element(),
+            View::Settings => self.settings_view(&theme, cx).into_any_element(),
+        };
+        // After the views, which may have just made some of these.
+        for input in self.fields.iter().chain([&self.input]).chain(self.texts.values()) {
             input.update(cx, |input, _| {
                 input.dim = theme.dim;
                 input.accent = theme.accent;
             });
         }
-        let main = match self.view {
-            View::Chat => self.chat_view(&theme, window, cx).into_any_element(),
-            View::Settings => self.settings_view(&theme, cx).into_any_element(),
-        };
         div()
             .key_context("Nibble")
             .on_action(cx.listener(Self::submit))
@@ -1288,7 +1338,7 @@ impl Render for Nibble {
             .flex()
             .bg(theme.page)
             .text_color(theme.fg)
-            .text_size(px(13.5))
+            .text_size(px(TEXT))
             .child(self.sidebar(&theme, cx))
             .child(main)
     }

@@ -69,17 +69,28 @@
   `roots` worked out. Never the token or `url`. The window's settings page
   shows these in its empty fields ("in use: 6") in place of the default hints,
   and asks again each time it opens, so a model switch shows its presets.
+- The window's input wraps and grows to ten lines, then scrolls. Return sends;
+  Shift-Return (or Option- or Control-Return) starts a new line, and Up and
+  Down move by row. Settings fields wrap a long value onto up to four lines.
+- The text of replies and of your own messages can be selected (drag, double-
+  and triple-click, Shift-click, Shift and the arrow keys) and copied with Cmd-C.
+- The window looks like a Mac app: the page runs up under a transparent title
+  bar, the sidebar is a grey source list with the server's address and a
+  status dot, your messages are bubbles on the right, tool calls are chips,
+  code blocks carry their language and a Copy button, and the composer floats
+  as a card. Choices on the settings page are segmented controls. It builds
+  and runs on Linux too, which is how it was checked (under Xvfb).
 
 ## Next
 
 - Look at the GPUI window: its layout has only been checked through a trace
   and its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories pointed
   somewhere disposable), never seen.
-- The GPUI input is one line and does not scroll sideways. It needs to grow
-  into a multi-line field. It has the macOS editing keys (by word, to either
-  end, the Control keys, undo, double-click), but not spell-check, autocorrect
-  or Look Up, which belong to AppKit's text system and are out of reach.
-- Replies have a Copy button, but their text can't be selected.
+- The GPUI input has no spell-check, autocorrect or Look Up: they belong to
+  AppKit's text system and are out of reach.
+- A selection in a reply stays inside one block (a run of text or a code
+  block). Selecting across blocks would need one text element for the whole
+  reply; until then, Copy takes all of it.
 - The app bundle has no icon.
 - A skill for Claude is not needed so far: the MCP server's `instructions`
   already say when delegation is worth it.
