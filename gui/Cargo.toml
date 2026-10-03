@@ -3,8 +3,9 @@ name = "nibble-gui"
 version = "0.1.0"
 edition = "2024"
 description = "A native chat window for nibble"
-# MIT, except src/input.rs, which is adapted from Apache-2.0 code.
-license = "MIT AND Apache-2.0"
+# MIT, except src/input.rs, which is adapted from Apache-2.0 code, and the
+# Inter font in fonts/, which is under the SIL Open Font License.
+license = "MIT AND Apache-2.0 AND OFL-1.1"
 
 # Its own project, not a workspace member, so the CLI keeps its two
 # dependencies and its small lock file.
