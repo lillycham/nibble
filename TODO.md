@@ -74,12 +74,13 @@
   Down move by row. Settings fields wrap a long value onto up to four lines.
 - The text of replies and of your own messages can be selected (drag, double-
   and triple-click, Shift-click, Shift and the arrow keys) and copied with Cmd-C.
-- The window looks like a Mac app: the page runs up under a transparent title
-  bar, the sidebar is a grey source list with the server's address and a
-  status dot, your messages are bubbles on the right, tool calls are chips,
-  code blocks carry their language and a Copy button, and the composer floats
-  as a card. Choices on the settings page are segmented controls. It builds
-  and runs on Linux too, which is how it was checked (under Xvfb).
+- The window's look follows the tiny-lm palette: warm greys, slate blue for
+  you and the controls, teal for tool calls, sage for a live server. Chats
+  are tabs along the top, your messages are headings in Charter, replies and
+  the rest are in Inter (bundled in `gui/fonts/`, OFL), and a status bar
+  holds the server, the model list and Settings. Choices on the settings
+  page are segmented controls. It builds and runs on Linux too, which is how
+  it was checked (under Xvfb).
 
 ## Next
 
