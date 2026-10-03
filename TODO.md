@@ -102,19 +102,20 @@ The presets so far rest on a few questions asked by hand. Measure instead.
 ### 3. The window as the main interface
 
 The desktop window is the primary interface for now. The web page stays as
-it is: no new work on it until phase 6. Done so far: multi-line input,
-selectable replies, and on the command line the stats line and `-f FILE`.
+it is: no new work on it until phase 6. Done so far: the console layout,
+multi-line input, selectable replies, and on the command line the stats line
+and `-f FILE`.
 
-- Look at the window: its layout has only been checked through a trace and
-  its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories pointed
-  somewhere disposable), never seen.
+- Look at the window on macOS: it has been seen only under Xvfb on Linux,
+  besides its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories
+  pointed somewhere disposable).
 - The input has the macOS editing keys, but not spell-check, autocorrect or
   Look Up, which belong to AppKit's text system and are out of reach.
 - A selection in a reply stays inside one block (a run of text or a code
   block). Selecting across blocks would need one text element for the whole
   reply; until then, Copy takes all of it.
 - An app icon.
-- Model state in the header: idle, loading or loaded. A cold start is the
+- Model state in the status bar: idle, loading or loaded. A cold start is the
   slow part, and today it looks like a hang.
 - Stats line per turn in the window, as the command line has.
 - Attach files by dragging them into the window, as `-f FILE` does on the
