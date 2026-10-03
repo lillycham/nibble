@@ -1,0 +1,22 @@
+[
+  { "question": "What version is lighthouse at?", "expect": ["2.3.1"] },
+  { "question": "How many seconds apart does lighthouse check a target by default?", "expect": ["45"] },
+  { "question": "How long does a check wait for an answer before it fails, by default?", "expect": ["7.5"] },
+  { "question": "Which Python version does lighthouse need at least?", "expect": ["3.11"] },
+  { "question": "Which notification backends does lighthouse support?", "expect": ["email|e-mail|smtp", "matrix", "ntfy"] },
+  { "question": "Where does lighthouse read its watch file from?", "expect": [".config/lighthouse/watch.toml"] },
+  { "question": "On which port does lighthouse serve its metrics?", "expect": ["9137"] },
+  { "question": "How many days before a TLS certificate expires does lighthouse warn?", "expect": ["21"] },
+  { "question": "What is the name of the database table that holds check results?", "expect": ["probes"] },
+  { "question": "How many days of results does lighthouse keep?", "expect": ["90"] },
+  { "question": "In which version were Matrix notifications added?", "expect": ["2.1.0"] },
+  { "question": "Which function sends ntfy notifications?", "expect": ["send_ntfy"] },
+  { "question": "Which ntfy server does lighthouse use when none is set?", "expect": ["ntfy.sh"] },
+  { "question": "How many failed checks in a row before a target counts as down?", "expect": ["3|three"] },
+  { "question": "Which HTTP library does lighthouse use?", "expect": ["httpx"] },
+  { "question": "What User-Agent header do the HTTP checks send?", "expect": ["lighthouse-probe/2"] },
+  { "question": "What is the systemd unit for lighthouse called?", "expect": ["lighthouse-watch"] },
+  { "question": "When was lighthouse's first stable release?", "expect": ["2021-04-12|12 April 2021|April 12, 2021|12th April 2021|April 12th, 2021"] },
+  { "question": "Under which licence is lighthouse published, and who maintains it?", "expect": ["ISC", "Ines Okafor"] },
+  { "question": "What was the default check interval before version 2.0.0?", "expect": ["60|minute"] }
+]

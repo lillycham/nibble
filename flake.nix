@@ -91,7 +91,7 @@
           # doesn't rebuild the CLI.
           src = pkgs.lib.fileset.toSource {
             root = ./.;
-            fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ];
+            fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ./eval ];
           };
           cargoLock.lockFile = ./Cargo.lock;
           # `nibble serve` starts nibble-mlx-server by name. Put it at the end
