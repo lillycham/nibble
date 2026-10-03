@@ -97,6 +97,13 @@ pub fn show(field: &Field, settings: &Map<String, Value>) -> String {
     }
 }
 
+/// What the server says it uses for a field, as the hint for an empty one.
+/// None when it doesn't say, or says nothing worth showing.
+pub fn in_use(field: &Field, server: &Map<String, Value>) -> Option<String> {
+    let value = show(field, server);
+    (!value.is_empty()).then(|| format!("in use: {value}"))
+}
+
 /// Put what was typed into the settings. An empty field removes the key, so
 /// the default (or the model's preset) applies again. An empty secret leaves
 /// the stored one alone.
@@ -164,5 +171,19 @@ mod tests {
         apply(field("prompt"), "", &mut settings).unwrap();
         assert!(!settings.contains_key("prompt"));
         assert!(apply(field("max_tokens"), "lots", &mut settings).is_err());
+    }
+
+    #[test]
+    fn the_server_s_settings_become_hints() {
+        let server: Map<String, Value> =
+            serde_json::from_str(r#"{ "max_calls": 6, "tools": false, "roots": ["/a", "/b"], "prompt": "light", "token": "x" }"#)
+                .unwrap();
+        assert_eq!(in_use(field("max_calls"), &server).as_deref(), Some("in use: 6"));
+        assert_eq!(in_use(field("tools"), &server).as_deref(), Some("in use: off"));
+        assert_eq!(in_use(field("roots"), &server).as_deref(), Some("in use: /a, /b"));
+        assert_eq!(in_use(field("prompt"), &server).as_deref(), Some("in use: light"));
+        // Not said, or a secret: the field keeps its own hint.
+        assert_eq!(in_use(field("idle_seconds"), &server), None);
+        assert_eq!(in_use(field("token"), &server), None);
     }
 }
