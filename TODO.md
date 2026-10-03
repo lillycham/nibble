@@ -50,6 +50,11 @@
 - `nibble mcp` asks `nibble serve` for its model before each `tools/list` and
   `tools/call`, and loads that model's presets when it has changed, so a switch
   needs no restart. `NIBBLE_MODEL` pins it.
+- Saved chats on the command line, in the window's files, so either can go on
+  with a chat from the other. The terminal chat saves as it goes; `-c` goes on
+  with the newest, `-r ID` with any, and `nibble chats` lists them. A one-shot
+  prompt is saved only when it continues a chat. Tool results are not kept, so
+  a resumed chat carries the questions and answers only.
 
 ## Next
 
@@ -70,7 +75,6 @@
 - Stats line per turn: prompt size, tokens, speed.
 - `-f FILE` to attach files without a tool round.
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
-- Sessions for the command line: save and resume chats (the window has them).
 - In the window's settings page: a field per model preset, and masking for the token.
 - Settings page: fill each empty field with the value really in use, not a
   grey hint that repeats a default written into the GUI. The server knows its

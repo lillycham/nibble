@@ -126,6 +126,13 @@ impl Events for Quiet {
     }
 }
 
+/// A tool call in a few words, for a chat's record: the name, and the path
+/// or search text it was given.
+pub fn describe(name: &str, arguments: &Value) -> String {
+    let about = arguments["text"].as_str().or(arguments["path"].as_str()).unwrap_or(".");
+    format!("{name} {about}")
+}
+
 static URL: OnceLock<String> = OnceLock::new();
 
 /// Send requests here instead of to the configured address. `nibble serve`

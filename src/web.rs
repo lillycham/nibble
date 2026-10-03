@@ -147,8 +147,7 @@ impl chat::Events for Stream<'_> {
     }
 
     fn tool(&mut self, name: &str, arguments: &Value) -> io::Result<()> {
-        let about = arguments["text"].as_str().or(arguments["path"].as_str()).unwrap_or(".");
-        self.send(json!({ "tool": format!("{name} {about}") }))
+        self.send(json!({ "tool": chat::describe(name, arguments) }))
     }
 }
 
