@@ -6,6 +6,7 @@ mod input;
 mod settings;
 mod store;
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -187,6 +188,9 @@ struct Nibble {
     view: View,
     input: Entity<TextInput>,
     chat: Chat,
+    /// The open chat's text, read-only so that it can be selected, by turn,
+    /// part and block. A turn's own message is part `usize::MAX`.
+    texts: HashMap<(usize, usize, usize), Entity<TextInput>>,
     chats: Vec<Entry>,
     scroll: ScrollHandle,
     /// Set while a reply is arriving. Raising the flag stops it.
@@ -204,7 +208,7 @@ struct Nibble {
 
 impl Nibble {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new("Ask something small", cx));
+        let input = cx.new(|cx| TextInput::multiline("Ask something small", 10, cx));
         window.focus(&input.focus_handle(cx));
         // Follow the system when it switches between light and dark.
         cx.observe_window_appearance(window, |_, _, cx| cx.notify()).detach();
@@ -218,6 +222,7 @@ impl Nibble {
             view: View::Chat,
             input,
             chat: Chat::new(),
+            texts: HashMap::new(),
             chats: store::list(),
             scroll: ScrollHandle::new(),
             running: None,
@@ -388,6 +393,7 @@ impl Nibble {
         self.stop();
         self.keep();
         self.chat = chat;
+        self.texts.clear();
         self.view = View::Chat;
         self.scroll.scroll_to_bottom();
         window.focus(&self.input.focus_handle(cx));
@@ -527,25 +533,43 @@ impl Nibble {
     }
 }
 
+/// Text that can be selected, kept from one frame to the next so that the
+/// selection is too, and brought up to date as a reply grows.
+fn selectable(
+    texts: &mut HashMap<(usize, usize, usize), Entity<TextInput>>,
+    key: (usize, usize, usize),
+    text: &str,
+    cx: &mut App,
+) -> Entity<TextInput> {
+    let entity = texts.entry(key).or_insert_with(|| cx.new(TextInput::read_only)).clone();
+    entity.update(cx, |input, cx| input.show(text, cx));
+    entity
+}
+
 /// Just enough Markdown for a chat: fenced code gets its own block.
-fn reply(text: &str, theme: &Theme) -> impl IntoElement {
-    div().flex().flex_col().gap_2().children(text.split("```").enumerate().filter(|(_, part)| !part.trim().is_empty()).map(
-        |(n, part)| {
-            if n % 2 == 1 {
-                // The first line of a fence is its language tag.
-                let code = part.split_once('\n').map_or(part, |(_, code)| code).trim_end();
-                div()
-                    .bg(theme.code)
-                    .rounded_md()
-                    .p_2()
-                    .font_family("Menlo")
-                    .text_size(px(12.5))
-                    .child(SharedString::from(code.to_string()))
-            } else {
-                div().child(SharedString::from(part.trim().to_string()))
-            }
-        },
-    ))
+fn reply(
+    texts: &mut HashMap<(usize, usize, usize), Entity<TextInput>>,
+    (turn, part): (usize, usize),
+    text: &str,
+    theme: &Theme,
+    cx: &mut App,
+) -> impl IntoElement {
+    let blocks = text.split("```").enumerate().filter(|(_, block)| !block.trim().is_empty()).map(|(n, block)| {
+        if n % 2 == 1 {
+            // The first line of a fence is its language tag.
+            let code = block.split_once('\n').map_or(block, |(_, code)| code).trim_end();
+            div()
+                .bg(theme.code)
+                .rounded_md()
+                .p_2()
+                .font_family("Menlo")
+                .text_size(px(12.5))
+                .child(selectable(texts, (turn, part, n), code, cx))
+        } else {
+            div().child(selectable(texts, (turn, part, n), block.trim(), cx))
+        }
+    });
+    div().flex().flex_col().gap_2().children(blocks)
 }
 
 fn button(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, theme: &Theme) -> Stateful<Div> {
@@ -619,11 +643,12 @@ impl Nibble {
             )
     }
 
-    fn chat_view(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn chat_view(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let texts = &mut self.texts;
         let log = div().id("log").flex_1().overflow_y_scroll().track_scroll(&self.scroll).px_4().children(
             self.chat.turns.iter().enumerate().map(|(n, turn)| {
                 let answer = turn.answer();
-                // The text can't be selected, so offer the whole reply.
+                // The whole reply at once, code blocks and all.
                 let copy = (!answer.trim().is_empty()).then(|| {
                     div()
                         .id(("copy", n))
@@ -641,9 +666,14 @@ impl Nibble {
                     .flex_col()
                     .gap_2()
                     .py_2()
-                    .child(div().bg(theme.user).rounded_lg().px_3().py_2().child(SharedString::from(turn.user.clone())))
-                    .children(turn.parts.iter().map(|part| match part {
-                        Part::Text(text) => reply(text, theme).into_any_element(),
+                    .child(div().bg(theme.user).rounded_lg().px_3().py_2().child(selectable(
+                        texts,
+                        (n, usize::MAX, 0),
+                        &turn.user,
+                        cx,
+                    )))
+                    .children(turn.parts.iter().enumerate().map(|(p, part)| match part {
+                        Part::Text(text) => reply(texts, (n, p), text, theme, cx).into_any_element(),
                         Part::Tool(tool) => {
                             div().text_color(theme.dim).text_size(px(12.)).child(format!("· {tool}")).into_any_element()
                         }
@@ -681,7 +711,7 @@ impl Nibble {
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_end()
                     .gap_2()
                     .px_4()
                     .py_3()
@@ -844,16 +874,17 @@ impl Nibble {
 impl Render for Nibble {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(window);
-        for input in self.fields.iter().chain([&self.input]) {
+        let main = match self.view {
+            View::Chat => self.chat_view(&theme, cx).into_any_element(),
+            View::Settings => self.settings_view(&theme, cx).into_any_element(),
+        };
+        // After the views, which may have just made some of these.
+        for input in self.fields.iter().chain([&self.input]).chain(self.texts.values()) {
             input.update(cx, |input, _| {
                 input.dim = theme.dim;
                 input.accent = theme.accent;
             });
         }
-        let main = match self.view {
-            View::Chat => self.chat_view(&theme, cx).into_any_element(),
-            View::Settings => self.settings_view(&theme, cx).into_any_element(),
-        };
         div()
             .key_context("Nibble")
             .on_action(cx.listener(Self::submit))

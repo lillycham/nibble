@@ -50,17 +50,22 @@
 - `nibble mcp` asks `nibble serve` for its model before each `tools/list` and
   `tools/call`, and loads that model's presets when it has changed, so a switch
   needs no restart. `NIBBLE_MODEL` pins it.
+- The window's input wraps and grows to ten lines, then scrolls. Return sends;
+  Shift-Return (or Option- or Control-Return) starts a new line, and Up and
+  Down move by row. Settings fields wrap a long value onto up to four lines.
+- The text of replies and of your own messages can be selected (drag, double-
+  and triple-click, Shift-click, Shift and the arrow keys) and copied with Cmd-C.
 
 ## Next
 
 - Look at the GPUI window: its layout has only been checked through a trace
   and its self-test (`NIBBLE_GUI_SELFTEST=1`, with the XDG directories pointed
   somewhere disposable), never seen.
-- The GPUI input is one line and does not scroll sideways. It needs to grow
-  into a multi-line field. It has the macOS editing keys (by word, to either
-  end, the Control keys, undo, double-click), but not spell-check, autocorrect
-  or Look Up, which belong to AppKit's text system and are out of reach.
-- Replies have a Copy button, but their text can't be selected.
+- The GPUI input has no spell-check, autocorrect or Look Up: they belong to
+  AppKit's text system and are out of reach.
+- A selection in a reply stays inside one block (a run of text or a code
+  block). Selecting across blocks would need one text element for the whole
+  reply; until then, Copy takes all of it.
 - The app bundle has no icon.
 - A skill for Claude is not needed so far: the MCP server's `instructions`
   already say when delegation is worth it.
