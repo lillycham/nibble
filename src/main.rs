@@ -27,10 +27,14 @@ const USAGE: &str = "usage: nibble [options] [PROMPT...]
 Text piped on stdin is given to the model as input for the prompt.
 With no prompt and no pipe, nibble starts a chat.
 
+  -f, --file FILE       attach a file to the prompt (or the chat's first
+                        message); repeat for more. Its whole text is sent, so
+                        the model needs no tool to read it
   -s, --system TEXT     replace the system prompt
   -n, --max-tokens N    reply length limit
       --no-tools        don't let the model read files
-      --tools           let it read files even when input is piped in
+      --tools           let it read files even when input is piped in or
+                        files are attached
       --no-claude       don't let the model ask Claude for help
       --anywhere        let the model read files outside the current directory
 
@@ -42,28 +46,39 @@ struct Args {
     system: String,
     max_tokens: u32,
     prompt: String,
+    /// The attached files, each in a <file> block, ready to append to a message.
+    files: String,
     tools: Vec<Value>,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Option<Args>, Box<dyn Error>> {
     let mut system = None;
     let mut max_tokens = config::get().max_tokens;
-    // Piped input is the whole task, so the model gets no tools with it: an
-    // eager model otherwise goes looking for files, and the schemas cost tokens.
-    let (mut tools, mut claude, mut confined) = (config::get().tools && !piped, tools::claude_allowed(), true);
+    let (mut tools, mut claude, mut confined) = (None, tools::claude_allowed(), true);
     let mut words = Vec::new();
+    let mut files = String::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
+            "-f" | "--file" => {
+                // The user named the file, so it may be anywhere: confinement
+                // is for the model's own reads.
+                let path = args.next().ok_or("-f needs a file")?;
+                files += &mcp::attach(&path, &tools::read_text(&tools::expand(&path))?);
+            }
             "-s" | "--system" => system = Some(args.next().ok_or("-s needs a value")?),
             "-n" | "--max-tokens" => max_tokens = args.next().ok_or("-n needs a value")?.parse()?,
-            "--no-tools" => tools = false,
-            "--tools" => tools = true,
+            "--no-tools" => tools = Some(false),
+            "--tools" => tools = Some(true),
             "--no-claude" => claude = false,
             "--anywhere" => confined = false,
             _ => words.push(arg),
         }
     }
+    // Piped input and attached files are the whole task, so the model gets no
+    // tools with them: an eager model otherwise goes looking for files, and
+    // the schemas cost tokens.
+    let tools = tools.unwrap_or(config::get().tools && !piped && files.is_empty());
     if tools && confined {
         tools::confine(&[std::env::current_dir()?])?;
     }
@@ -81,11 +96,13 @@ fn parse_args(mut args: impl Iterator<Item = String>, piped: bool) -> Result<Opt
         system
     });
     let tools = if tools { tools::schemas(claude) } else { Vec::new() };
-    Ok(Some(Args { system, max_tokens, prompt: words.join(" "), tools }))
+    Ok(Some(Args { system, max_tokens, prompt: words.join(" "), files, tools }))
 }
 
 fn repl(args: &Args) -> Result<(), Box<dyn Error>> {
     let mut messages = vec![message("system", &args.system)];
+    // Attached files go with the first message, and wait for one that gets an answer.
+    let mut files = args.files.clone();
     let mut line = String::new();
     loop {
         eprint!("> ");
@@ -98,10 +115,13 @@ fn repl(args: &Args) -> Result<(), Box<dyn Error>> {
             continue;
         }
         let before = messages.len();
-        messages.push(message("user", line.trim()));
-        if let Err(e) = chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default()) {
-            eprintln!("nibble: {e}");
-            messages.truncate(before);
+        messages.push(message("user", &format!("{}{files}", line.trim())));
+        match chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default()) {
+            Ok(_) => files.clear(),
+            Err(e) => {
+                eprintln!("nibble: {e}");
+                messages.truncate(before);
+            }
         }
         chat::trim(&mut messages);
     }
@@ -167,7 +187,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     };
 
+    // Refuse rather than cut an attached file: an answer from half a file
+    // would look just as confident as one from the whole of it. Piped input
+    // gets what room is left.
     let budget = config::get().input_chars;
+    if args.files.len() > budget {
+        return Err(format!(
+            "the attached files are {} characters, over the limit of {budget} (input_chars)",
+            args.files.len()
+        )
+        .into());
+    }
+    let budget = budget - args.files.len();
     if input.trim().len() > budget {
         eprintln!("nibble: input is {} characters, so the middle is cut to fit {budget}", input.trim().len());
     }
@@ -179,7 +210,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         (true, false) => input.into_owned(),
         (false, true) => args.prompt.clone(),
         (false, false) => format!("{}\n\n<input>\n{input}\n</input>", args.prompt),
-    };
+    } + &args.files;
     let mut messages = vec![message("system", &args.system), message("user", &user)];
     chat::run(&mut messages, &args.tools, args.max_tokens, &mut chat::Terminal::default())?;
     Ok(())
@@ -192,5 +223,40 @@ fn main() -> ExitCode {
             eprintln!("nibble: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attached_files_go_whole_and_turn_tools_off() {
+        let dir = std::env::temp_dir().join(format!("nibble-attach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "first\n").unwrap();
+        std::fs::write(&b, "second\n").unwrap();
+        let argv = |extra: &[&str]| {
+            let mut argv = vec!["-f", a.to_str().unwrap(), "what", "is", "this", "--file", b.to_str().unwrap()];
+            argv.extend(extra);
+            argv.into_iter().map(String::from).collect::<Vec<_>>()
+        };
+
+        let args = parse_args(argv(&[]).into_iter(), false).unwrap().unwrap();
+        assert_eq!(args.prompt, "what is this");
+        let expected = format!(
+            "\n\n<file path=\"{}\">\nfirst\n</file>\n\n<file path=\"{}\">\nsecond\n</file>",
+            a.display(),
+            b.display()
+        );
+        assert_eq!(args.files, expected);
+        assert!(args.tools.is_empty());
+
+        let missing = ["-f".to_string(), dir.join("missing").display().to_string()];
+        assert!(parse_args(missing.into_iter(), false).is_err());
+        assert!(parse_args(["-f".to_string()].into_iter(), false).is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

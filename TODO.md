@@ -50,6 +50,11 @@
 - `nibble mcp` asks `nibble serve` for its model before each `tools/list` and
   `tools/call`, and loads that model's presets when it has changed, so a switch
   needs no restart. `NIBBLE_MODEL` pins it.
+- `-f FILE` (repeatable) attaches a file to the prompt, or to a chat's first
+  message, so the model needs no tool round to read it. Like piped input, it
+  turns the tools off unless `--tools` is given. The user named the file, so
+  it may be outside the current directory. Files over `input_chars` are
+  refused, not cut; piped input gets what room is left.
 
 ## Next
 
@@ -68,7 +73,6 @@
 ## Later
 
 - Stats line per turn: prompt size, tokens, speed.
-- `-f FILE` to attach files without a tool round.
 - Recipes: named presets (`nibble commit`, `nibble summarise`), declared in the Nix module.
 - Sessions for the command line: save and resume chats (the window has them).
 - In the window's settings page: a field per model preset, and masking for the token.
