@@ -16,6 +16,9 @@ pub struct Session {
     /// As saved: `{"user", "parts": [{"text"} | {"tool"} | {"error"}]}`, and
     /// "typed" for a command: what was typed, where "user" is what was sent.
     pub turns: Vec<Value>,
+    /// The folder the window set for the chat, kept so that going on with
+    /// it here doesn't lose it. The command line works in its own directory.
+    dir: Value,
 }
 
 fn dir() -> Option<PathBuf> {
@@ -42,7 +45,7 @@ fn answer(turn: &Value) -> String {
 impl Session {
     /// A new, empty chat. Its id is the time, so ids sort by age.
     pub fn new() -> Self {
-        Session { id: now_millis().to_string(), turns: Vec::new() }
+        Session { id: now_millis().to_string(), turns: Vec::new(), dir: Value::Null }
     }
 
     pub fn load(id: &str) -> Result<Self, Box<dyn Error>> {
@@ -51,7 +54,7 @@ impl Session {
         let text = fs::read_to_string(&path).map_err(|_| missing())?;
         let saved: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let turns = saved["turns"].as_array().cloned().unwrap_or_default();
-        Ok(Session { id: id.to_string(), turns })
+        Ok(Session { id: id.to_string(), turns, dir: saved["dir"].clone() })
     }
 
     /// The newest saved chat, from here or from the window.
@@ -90,7 +93,10 @@ impl Session {
         let path = file(&self.id).ok_or("no data directory, because HOME is not set")?;
         let dir = path.parent().ok_or("no data directory")?;
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let saved = json!({ "title": self.title(), "turns": self.turns });
+        let mut saved = json!({ "title": self.title(), "turns": self.turns });
+        if self.dir.is_string() {
+            saved["dir"] = self.dir.clone();
+        }
         fs::write(&path, format!("{saved:#}\n")).map_err(|e| format!("{}: {e}", path.display()).into())
     }
 
@@ -184,6 +190,7 @@ mod tests {
                 json!({ "user": "What is in src?\nmore", "parts": [{ "tool": "list_dir src" }, { "text": "main.rs" }] }),
                 json!({ "user": "And tests?", "parts": [{ "error": "no answer" }] }),
             ],
+            dir: Value::Null,
         };
         assert_eq!(session.title(), "What is in src?");
         let messages = session.messages("sys");

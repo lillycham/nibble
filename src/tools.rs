@@ -1,6 +1,7 @@
 //! The tools the model can call. The file tools only read, and `ask_claude`
 //! hands a question to a bigger model.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -84,7 +85,7 @@ pub fn call(name: &str, args: &Value) -> String {
         // is a right name behind a wrong directory.
         let mut places = Vec::new();
         if let Some(name) = args["path"].as_str().and_then(|path| Path::new(path).file_name()) {
-            find_named(Path::new("."), name, &mut places, 0);
+            find_named(&locate(Path::new(".")), name, &mut places, 0);
         }
         if places.is_empty() {
             format!("error: {e}. Paths are relative to the current directory. Call list_dir to see what is there.")
@@ -107,7 +108,8 @@ fn find_named(dir: &Path, name: &std::ffi::OsStr, places: &mut Vec<String>, dept
         let file_name = entry.file_name();
         if kind.is_file() && file_name == name {
             let path = entry.path();
-            places.push(path.strip_prefix(".").unwrap_or(&path).display().to_string());
+            let path = path.strip_prefix(".").unwrap_or(&path);
+            places.push(shown(path));
         } else if kind.is_dir() && depth < 6 {
             let hidden = file_name.to_string_lossy().starts_with('.');
             if !hidden && !SKIP_DIRS.contains(&file_name.to_string_lossy().as_ref()) {
@@ -139,6 +141,62 @@ fn roots() -> &'static [PathBuf] {
     ROOTS.get().map_or(&[], Vec::as_slice)
 }
 
+thread_local! {
+    /// The directory this thread's chat works in, when it named one. It
+    /// stands in for the current directory, which is the whole process's,
+    /// and it is the only place the tools may read.
+    static HERE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Work in `dir` for as long as the scope is kept: relative paths start
+/// there, and nothing outside it can be read. `dir` must be inside the
+/// roots. For `nibble serve`, which handles each chat on its own thread.
+pub fn within(dir: &Path) -> Result<Scope, String> {
+    let real = fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !real.is_dir() {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    if !roots().is_empty() && !roots().iter().any(|root| real.starts_with(root)) {
+        let allowed: Vec<_> = roots().iter().map(|root| root.display().to_string()).collect();
+        return Err(format!("{} is outside {}", dir.display(), allowed.join(", ")));
+    }
+    HERE.with(|here| *here.borrow_mut() = Some(real));
+    Ok(Scope(()))
+}
+
+/// While it lives, the tools work in the directory given to `within`.
+pub struct Scope(());
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        HERE.with(|here| *here.borrow_mut() = None);
+    }
+}
+
+fn here() -> Option<PathBuf> {
+    HERE.with(|here| here.borrow().clone())
+}
+
+/// Where a path the model gave really is: in the chat's directory, if it
+/// has one, else the current one.
+fn locate(path: &Path) -> PathBuf {
+    match here() {
+        Some(dir) => dir.join(path),
+        None => path.to_path_buf(),
+    }
+}
+
+/// A path as the model should see it: relative to the chat's directory,
+/// since models miscopy long absolute paths.
+fn shown(path: &Path) -> String {
+    let Some(dir) = here() else { return path.display().to_string() };
+    match path.strip_prefix(&dir) {
+        Ok(rest) if rest.as_os_str().is_empty() => ".".to_string(),
+        Ok(rest) => rest.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 /// Give a leading ~/ its usual meaning.
 pub fn expand(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
@@ -154,9 +212,9 @@ pub fn resolve(path: &str) -> Result<PathBuf, String> {
     // nibble/flake.nix, another /nix/flake.nix and /current_directory/TODO.md.
     // If the path as given does not exist but its tail does, take the tail.
     // The reply names the path that was read, so the model sees the correction.
-    if !path.exists() {
+    if !locate(&path).exists() {
         let parts: Vec<_> = path.components().filter(|part| matches!(part, std::path::Component::Normal(_))).collect();
-        let tail = (1..parts.len()).map(|skip| parts[skip..].iter().collect::<PathBuf>()).find(|tail| tail.exists());
+        let tail = (1..parts.len()).map(|skip| parts[skip..].iter().collect::<PathBuf>()).find(|tail| locate(tail).exists());
         if let Some(tail) = tail {
             path = tail;
         } else if path.is_absolute() && parts.len() == 1 {
@@ -164,15 +222,21 @@ pub fn resolve(path: &str) -> Result<PathBuf, String> {
             path = PathBuf::from(".");
         }
     }
-    if !roots().is_empty() {
+    // A chat's own directory narrows the roots down to itself.
+    let limits = match here() {
+        Some(dir) => vec![dir],
+        None => roots().to_vec(),
+    };
+    let located = locate(&path);
+    if !limits.is_empty() {
         // Canonical form, so neither .. nor a symlink can lead outside.
-        let real = fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if !roots().iter().any(|root| real.starts_with(root)) {
-            let allowed: Vec<_> = roots().iter().map(|root| root.display().to_string()).collect();
+        let real = fs::canonicalize(&located).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !limits.iter().any(|root| real.starts_with(root)) {
+            let allowed: Vec<_> = limits.iter().map(|root| root.display().to_string()).collect();
             return Err(format!("{} is outside {}, and you may only read inside it", path.display(), allowed.join(", ")));
         }
     }
-    Ok(path)
+    Ok(located)
 }
 
 fn path_arg(args: &Value) -> Result<PathBuf, String> {
@@ -194,9 +258,9 @@ pub fn clip(line: &str, max: usize) -> &str {
 }
 
 pub fn read_text(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", shown(path)))?;
     if bytes.iter().take(8000).any(|&b| b == 0) {
-        return Err(format!("{} is a binary file", path.display()));
+        return Err(format!("{} is a binary file", shown(path)));
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -208,7 +272,7 @@ fn read_file(args: &Value) -> Result<String, String> {
     let total = text.lines().count();
     let start = number_arg(args, "start_line").unwrap_or(1).max(1);
     if start > total.max(1) {
-        return Err(format!("{} has only {total} lines", path.display()));
+        return Err(format!("{} has only {total} lines", shown(&path)));
     }
 
     let mut body = String::new();
@@ -224,7 +288,7 @@ fn read_file(args: &Value) -> Result<String, String> {
     }
 
     // The model can't count lines reliably, so tell it.
-    let name = path.display();
+    let name = shown(&path);
     if start == 1 && end == total {
         return Ok(format!("{name}: {total} lines\n{body}"));
     }
@@ -242,7 +306,7 @@ fn read_file(args: &Value) -> Result<String, String> {
 
 fn entries(path: &Path) -> Result<Vec<String>, String> {
     let mut names: Vec<String> = fs::read_dir(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?
+        .map_err(|e| format!("{}: {e}", shown(path)))?
         .flatten()
         .map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -256,11 +320,11 @@ fn entries(path: &Path) -> Result<Vec<String>, String> {
 /// Where we are and what is here, for the system prompt. A small model is far
 /// more willing to open a file it can see the name of.
 pub fn context() -> String {
-    let Ok(dir) = std::env::current_dir() else { return String::new() };
+    let Some(dir) = here().or_else(|| std::env::current_dir().ok()) else { return String::new() };
     let mut names = entries(&dir).unwrap_or_default();
     let more = if names.len() > 40 { " ..." } else { "" };
     names.truncate(40);
-    let reach = if roots().is_empty() {
+    let reach = if roots().is_empty() && here().is_none() {
         "Files outside it are also yours to read: give the full path, such as /etc/hosts."
     } else {
         "You may only read files inside it."
@@ -285,7 +349,7 @@ fn list_dir(args: &Value) -> Result<String, String> {
     let mut names = entries(&path)?;
     let total = names.len();
     names.truncate(MAX_ENTRIES);
-    let mut out = format!("{}: {total} entries\n{}\n", path.display(), names.join("\n"));
+    let mut out = format!("{}: {total} entries\n{}\n", shown(&path), names.join("\n"));
     if total > MAX_ENTRIES {
         out.push_str(&format!("... and {} more\n", total - MAX_ENTRIES));
     }
@@ -313,7 +377,7 @@ fn search_file(path: &Path, words: &[String], found: &mut Found) {
         }
         let lower = line.to_lowercase();
         let score = words.iter().filter(|word| lower.contains(word.as_str())).count();
-        let hit = || format!("{}:{}: {}", path.display(), number + 1, clip(line.trim(), 200));
+        let hit = || format!("{}:{}: {}", shown(path), number + 1, clip(line.trim(), 200));
         if score == words.len() {
             found.full.push(hit());
         } else if score >= 2 && found.partial.len() < 500 {
@@ -450,6 +514,20 @@ mod tests {
         // An invented directory in front of a real path is dropped.
         assert!(call("read_file", &json!({ "path": "/current_directory/sub/deep.txt" })).starts_with("sub/deep.txt"));
         assert!(call("read_file", &json!({ "path": "in/ok.txt" })).contains("fine"));
+
+        // A chat's own directory: paths start there, shown relative to it,
+        // and the rest of the root is out of reach.
+        assert!(within(&outside).is_err());
+        assert!(within(&inside.join("sub/deep.txt")).is_err());
+        {
+            let _scope = within(&inside.join("sub")).unwrap();
+            assert!(call("read_file", &json!({ "path": "deep.txt" })).starts_with("deep.txt: 1 lines"));
+            assert!(call("list_dir", &json!({})).starts_with(".: 1 entries\ndeep.txt"));
+            assert!(call("search", &json!({ "text": "x" })).starts_with("deep.txt:1: x"));
+            assert!(call("read_file", &json!({ "path": "../ok.txt" })).starts_with("error:"));
+            assert!(context().contains("holds: deep.txt\n"));
+        }
+        assert!(call("read_file", &json!({ "path": "ok.txt" })).contains("fine"));
 
         fs::remove_dir_all(&base).unwrap();
     }

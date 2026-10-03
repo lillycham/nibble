@@ -135,7 +135,8 @@ pub fn respond(client: &mut TcpStream, status: &str, kind: &str, body: &[u8]) ->
 /// A chat turn as server-sent events: {"text"} as the reply grows, {"tool"}
 /// for each tool call, then {"done"} with the turn's stats, or {"error"}.
 /// The request may name a "recipe" whose settings apply to the turn, and ask
-/// for "quote": then {"done"} says which quotes were found in the files.
+/// for "quote": then {"done"} says which quotes were found in the files. A
+/// "dir" inside the roots is where the file tools work, and all they may read.
 struct Stream<'a>(&'a mut TcpStream);
 
 impl Stream<'_> {
@@ -175,6 +176,17 @@ fn chat_turn(client: &mut TcpStream, request: &Request) -> io::Result<()> {
     // No ask_claude here: a remote chat should not be able to spend Claude
     // usage on this machine.
     let tools = if use_tools { tools::schemas(false) } else { Vec::new() };
+    // A chat may name the directory it is about, inside the roots. The tools
+    // then work there and read nowhere else, so the model doesn't wander
+    // through every root looking for the files it means. Kept until the turn
+    // is over, quotes included.
+    let _scope = match body["dir"].as_str().filter(|dir| use_tools && !dir.is_empty()) {
+        None => None,
+        Some(dir) => match tools::within(&tools::expand(dir)) {
+            Ok(scope) => Some(scope),
+            Err(e) => return respond(client, "400 Bad Request", "text/plain", format!("can't work in {dir}: {e}\n").as_bytes()),
+        },
+    };
     let mut system = match recipe.and_then(|r| r.system.as_deref()) {
         Some(system) => system.to_string(),
         None => {

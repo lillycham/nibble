@@ -12,7 +12,7 @@ mod store;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -20,8 +20,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    Animation, AnimationExt, App, Application, Bounds, Context, Div, Entity, ExternalPaths, Focusable, Hsla, KeyBinding, ScrollHandle,
-    SharedString,
+    Animation, AnimationExt, App, Application, Bounds, Context, Div, Entity, ExternalPaths, Focusable, Hsla, KeyBinding,
+    PathPromptOptions, ScrollHandle, SharedString,
     Stateful, TitlebarOptions, Window, WindowAppearance, WindowBounds, WindowOptions, actions, anchored, deferred, div,
     point, prelude::*, pulsating_between, px, rgb, size,
 };
@@ -546,6 +546,25 @@ impl Nibble {
                 done(self, cx);
                 self.quote = !self.quote;
             }
+            "cd" if !self.file_tools() => {
+                self.command_error = Some("The server gives chats no file tools, so there is no folder to choose.".into());
+            }
+            "cd" if rest.is_empty() => {
+                done(self, cx);
+                self.choose_dir(cx);
+            }
+            "cd" => {
+                // A relative path starts from where the chat works now.
+                let path = match (rest.strip_prefix("~/"), std::env::var_os("HOME")) {
+                    (Some(rest), Some(home)) => Path::new(&home).join(rest),
+                    _ if rest == "~" => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default(),
+                    _ => self.work_dir().map(|dir| dir.join(rest)).unwrap_or_else(|| PathBuf::from(rest)),
+                };
+                match self.set_dir(&path) {
+                    Ok(()) => done(self, cx),
+                    Err(error) => self.command_error = Some(error),
+                }
+            }
             "model" if rest.is_empty() => {
                 done(self, cx);
                 if self.models.all.len() < 2 {
@@ -623,6 +642,13 @@ impl Nibble {
         let leaving = std::mem::take(&mut self.leaving);
         self.attached.retain(|file| !leaving.contains(&file.path));
         for path in paths {
+            // A folder is where to work, when the model has tools to look in it.
+            if path.is_dir() && self.file_tools() {
+                if let Err(error) = self.set_dir(path) {
+                    self.attach_error = Some(error);
+                }
+                continue;
+            }
             if self.attached.iter().any(|file| file.path == attach::shown(path)) {
                 continue;
             }
@@ -666,6 +692,67 @@ impl Nibble {
         .detach();
     }
 
+    /// Whether the server gives chats its file tools, and so a folder to work in.
+    fn file_tools(&self) -> bool {
+        self.models.in_use.get("tools").and_then(Value::as_bool) == Some(true)
+    }
+
+    /// The folders the server lets chats read inside, as it gives them.
+    fn roots(&self) -> Vec<String> {
+        let roots = self.models.in_use.get("roots").and_then(Value::as_array);
+        roots.into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+    }
+
+    /// Where the open chat works: its own folder, or the server's first root.
+    fn work_dir(&self) -> Option<PathBuf> {
+        let dir = self.chat.dir.clone().or_else(|| self.roots().into_iter().next())?;
+        match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => Some(Path::new(&home).join(rest)),
+            _ => Some(PathBuf::from(dir)),
+        }
+    }
+
+    /// Have the open chat work in `path` from the next message on. The
+    /// server checks it again, but saying so here is quicker and plainer.
+    fn set_dir(&mut self, path: &Path) -> Result<(), String> {
+        let shown = attach::shown(path);
+        let real = std::fs::canonicalize(path).map_err(|e| format!("Can't work in {shown}: {e}"))?;
+        if !real.is_dir() {
+            return Err(format!("{shown} is not a folder"));
+        }
+        let roots = self.roots();
+        let inside = roots.iter().filter_map(|root| std::fs::canonicalize(root).ok()).any(|root| real.starts_with(root));
+        if !roots.is_empty() && !inside {
+            let roots: Vec<String> = roots.iter().map(|root| attach::shown(Path::new(root))).collect();
+            return Err(format!("{shown} is outside the folders chats may read: {}", roots.join(", ")));
+        }
+        self.chat.dir = Some(attach::shown(&real));
+        self.keep();
+        Ok(())
+    }
+
+    /// Ask for a folder with the system's own dialog.
+    fn choose_dir(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Work Here".into()),
+        });
+        // For the chat that asked, not one opened while the dialog was up.
+        let id = self.chat.id.clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            let _ = this.update(cx, |nibble, cx| {
+                if let (Some(path), true) = (paths.first(), nibble.chat.id == id) {
+                    nibble.command_error = nibble.set_dir(path).err();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn say(&mut self, text: &str, cx: &mut Context<Self>) {
         self.send(text, None, json!({}), cx);
     }
@@ -694,6 +781,9 @@ impl Nibble {
         }
         if self.quote {
             body["quote"] = json!(true);
+        }
+        if let Some(dir) = &self.chat.dir {
+            body["dir"] = json!(dir);
         }
         for (key, value) in extra.as_object().into_iter().flatten() {
             body[key] = value.clone();
@@ -962,6 +1052,15 @@ impl Nibble {
             this.update_in(cx, |nibble, window, cx| {
                 nibble.submit(&Submit, window, cx);
                 eprintln!("selftest save: {:?}", nibble.notice);
+            })?;
+            cx.background_executor().timer(pause).await;
+            this.update_in(cx, |nibble, window, cx| {
+                nibble.command("cd", "/", window, cx);
+                eprintln!("selftest cd /: {:?}, error: {:?}", nibble.chat.dir, nibble.command_error);
+                if let Some(root) = nibble.roots().first().cloned() {
+                    nibble.command("cd", &root, window, cx);
+                    eprintln!("selftest cd root: {:?}, error: {:?}", nibble.chat.dir, nibble.command_error);
+                }
             })?;
             cx.background_executor().timer(pause).await;
             this.update_in(cx, |nibble, window, cx| {
@@ -1699,6 +1798,7 @@ impl Nibble {
                         )
                     })
                     .child(div().flex_1())
+                    .children(self.folder(theme, cx))
                     .child(
                         div()
                             .id("send")
@@ -1726,6 +1826,57 @@ impl Nibble {
             .overflow_hidden()
             .child(log)
             .child(column(div().px_8().pt_1().pb_4().children(self.command_menu(theme, cx)).child(composer)))
+    }
+
+    /// Where the chat works, by Send: the server's first root, muted, until
+    /// a folder is chosen for it. A click asks for another; × goes back.
+    fn folder(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.file_tools() {
+            return None;
+        }
+        let chosen = self.chat.dir.is_some();
+        let shown = self.chat.dir.clone().or_else(|| self.roots().first().map(|root| attach::shown(Path::new(root))))?;
+        let (ink, blue) = (theme.ink, theme.blue);
+        Some(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .max_w(px(280.))
+                .rounded(px(4.))
+                .when(chosen, |chip| chip.bg(theme.blue_fill).text_color(theme.blue))
+                .child(
+                    div()
+                        .id("folder")
+                        .min_w_0()
+                        .px(px(6.))
+                        .truncate()
+                        .cursor_pointer()
+                        .hover(move |style| style.text_color(if chosen { blue } else { ink }))
+                        .on_click(cx.listener(|nibble, _, _, cx| {
+                            cx.stop_propagation();
+                            nibble.choose_dir(cx);
+                        }))
+                        .child(SharedString::from(format!("in {shown}"))),
+                )
+                .when(chosen, |chip| {
+                    chip.child(
+                        div()
+                            .id("folder-reset")
+                            .flex_shrink_0()
+                            .pr(px(6.))
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(ink))
+                            .on_click(cx.listener(|nibble, _, _, cx| {
+                                cx.stop_propagation();
+                                nibble.chat.dir = None;
+                                nibble.keep();
+                                cx.notify();
+                            }))
+                            .child("×"),
+                    )
+                }),
+        )
     }
 
     /// While a command's name is being typed, the commands it could be,

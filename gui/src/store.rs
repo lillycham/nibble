@@ -35,6 +35,9 @@ impl Turn {
 pub struct Chat {
     pub id: String,
     pub turns: Vec<Turn>,
+    /// The folder the model works in, with the home directory as `~`. None
+    /// means the server's own, its first root.
+    pub dir: Option<String>,
 }
 
 /// A row in the list of chats.
@@ -59,7 +62,7 @@ impl Chat {
     /// A new, empty chat. Its id is the time, so ids sort by age.
     pub fn new() -> Self {
         let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
-        Chat { id: millis.to_string(), turns: Vec::new() }
+        Chat { id: millis.to_string(), turns: Vec::new(), dir: None }
     }
 
     pub fn title(&self) -> String {
@@ -90,7 +93,11 @@ impl Chat {
                 saved
             })
             .collect();
-        json!({ "title": self.title(), "turns": turns })
+        let mut saved = json!({ "title": self.title(), "turns": turns });
+        if let Some(dir) = &self.dir {
+            saved["dir"] = json!(dir);
+        }
+        saved
     }
 
     fn from_json(id: &str, saved: &Value) -> Self {
@@ -120,7 +127,7 @@ impl Chat {
                     .collect(),
             })
             .collect();
-        Chat { id: id.to_string(), turns }
+        Chat { id: id.to_string(), turns, dir: saved["dir"].as_str().map(str::to_string) }
     }
 
     /// Write the chat to disk. An empty chat is not worth a file.
@@ -180,12 +187,14 @@ mod tests {
                 typed: None,
                 parts: vec![Part::Tool("list_dir src".into()), Part::Text("main.rs".into()), Part::Error("oops".into())],
             }],
+            dir: Some("~/devel/nibble".into()),
         };
         assert_eq!(chat.title(), "What is in src?");
         let back = Chat::from_json("42", &chat.to_json());
         assert_eq!(back.turns.len(), 1);
         assert_eq!(back.turns[0].answer(), "main.rs");
         assert_eq!(back.turns[0].parts.len(), 3);
+        assert_eq!(back.dir.as_deref(), Some("~/devel/nibble"));
         assert!(file("../escape").is_none());
 
         // A command keeps what was typed, and shows it.
