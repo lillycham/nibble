@@ -152,6 +152,14 @@ and `-f FILE`.
   server that takes images (mlx-vlm's), behind `nibble serve` like the other.
   Detection can come first. LFM2.5-2.6B is text-only; Liquid's vision
   models are LFM2-VL.
+- Animations: short eases in and out where the window now jumps. Candidates:
+  a new message or reply fading and sliding in, the settings page and chat
+  tabs crossfading, the drop overlay and file chips fading in and out, the
+  status dot easing between colours, and the context figure counting up.
+  Reuse the approach of the loading dot in the status bar
+  (`with_animation` with an easing function). Keep them subtle and quick
+  (about 150 to 250 ms), never in the way of typing or a streaming reply,
+  and off when the system asks for reduced motion.
 
 ### 4. Release 0.1
 
