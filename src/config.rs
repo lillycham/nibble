@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::RwLock;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 pub struct Config {
     /// Where the model server (or `nibble serve`) listens.
@@ -63,6 +63,9 @@ pub struct Config {
     pub token_file: String,
     /// Named prompts with settings: the built-in ones, then the file's.
     pub recipes: Vec<crate::recipes::Recipe>,
+    /// MCP servers whose tools a chat may ask for, by name. Each is checked
+    /// when the config is read. None is used unless a chat asks for it.
+    pub plugins: Map<String, Value>,
 }
 
 impl Default for Config {
@@ -94,6 +97,7 @@ impl Default for Config {
             token: String::new(),
             token_file: String::new(),
             recipes: crate::recipes::built_in(),
+            plugins: Map::new(),
         }
     }
 }
@@ -142,6 +146,14 @@ impl Config {
             "token" => text(value).map(|v| self.token = v),
             "token_file" => text(value).map(|v| self.token_file = v),
             "recipes" => return crate::recipes::merge(&mut self.recipes, value),
+            "plugins" => {
+                let plugins = value.as_object().ok_or("\"plugins\" must be an object")?;
+                for (name, plugin) in plugins {
+                    crate::plugins::parse(name, plugin)?;
+                }
+                self.plugins = plugins.clone();
+                Some(())
+            }
             // A typo should be loud, not a setting that quietly does nothing.
             _ => return Err(format!("unknown setting \"{key}\"")),
         };
@@ -180,6 +192,7 @@ impl Config {
             "token": if self.token.is_empty() { "" } else { "(set)" },
             "token_file": self.token_file,
             "recipes": crate::recipes::to_json(&self.recipes),
+            "plugins": self.plugins,
         })
     }
 }

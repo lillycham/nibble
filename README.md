@@ -31,6 +31,7 @@ nibble commit     # a recipe: a commit message for the staged changes
   many files, each in a fresh context. `delegate` takes `quote` too.
 - **`ask_claude`**: the other direction. The local model can pass a question
   that is too hard for it to `claude -p`.
+- **Plugins**: MCP servers whose tools a chat can ask for with `--plugin`.
 - **`nibble-gui`**: a native chat window, built with GPUI. Drop files on it to
   attach them to your next message, as `nibble -f` does.
 - **Slash commands**, in the chat and the window: `/new`, `/clear`, `/model`,
@@ -127,6 +128,32 @@ A restart of `nibble serve` goes back to `model`.
 `nibble eval` asks the model 20 questions about a small sample project and
 reports how many it got right, how many tool calls it made and how long it
 took. `--model NAME`, repeated, compares several models from the list.
+
+## Plugins
+
+A plugin is an MCP server, so the ones already written for other tools work
+here too. Set one up in the config file, and it stays off until a chat asks for
+it with `--plugin NAME` (or `-p`):
+
+```json
+{
+  "plugins": {
+    "git": {
+      "command": ["uvx", "mcp-server-git"],
+      "tools": ["git_status", "git_log", "git_diff"]
+    }
+  }
+}
+```
+
+Every tool's description is sent with every request, and a small model has
+little room, so plugins are never on by default. `tools` keeps only the ones
+you name; `nibble plugins` shows what each plugin offers and how many
+characters that adds to a request. `env` sets environment variables for it.
+
+A plugin runs in the current directory with your permissions, and nibble's own
+limits (read only, inside this directory) don't apply to it. Pick ones whose
+tools you'd let the model use.
 
 ## Reach
 
