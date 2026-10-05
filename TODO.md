@@ -137,6 +137,20 @@
   under the reply in the window. Quote mode stays on in the window until
   turned off; it is not saved with the chat.
 
+- A folder per chat in the window: `POST /chat` takes `"dir"`, which must
+  be inside `roots`. For that turn the file tools start there and read
+  nowhere else, so the model no longer looks through every root. The
+  folder is kept per thread, not as the process's current directory, so
+  chats in different folders can run at once. The window sets it from a
+  dropped folder, the folder button by Send (the system's folder dialog) or
+  `/cd PATH`, and saves it with the chat as `"dir"`. The command line keeps
+  the key when it continues such a chat, but works in its own directory.
+  `/info` says `"dir": true`, and the window shows the folder only then:
+  an older server ignores the field, which looked like the folder did
+  nothing.
+  Plugins still run in the server's directory. The web page has no control
+  for it yet (phase 6).
+
 ## Roadmap
 
 In this order. Each phase is useful on its own. Phase 1 (close the gaps) is

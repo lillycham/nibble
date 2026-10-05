@@ -90,7 +90,7 @@ fn a_chat_from_the_window_goes_on_in_the_terminal() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no saved chats"));
 
     // As the window saves a chat, including a tool line.
-    let window = json!({ "title": "What is in src?", "turns": [
+    let window = json!({ "title": "What is in src?", "dir": "~/devel/nibble", "turns": [
         { "user": "What is in src?", "parts": [{ "tool": "list_dir src" }, { "text": "main.rs" }] },
     ] });
     fs::write(chats.join("1000.json"), window.to_string()).unwrap();
@@ -112,6 +112,8 @@ fn a_chat_from_the_window_goes_on_in_the_terminal() {
     assert_eq!(chat["turns"].as_array().unwrap().len(), 2);
     assert_eq!(chat["turns"][1], json!({ "user": "And tests?", "parts": [{ "text": "the answer" }] }));
     assert_eq!(chat["title"], "What is in src?");
+    // The window's folder for the chat survives the terminal's save.
+    assert_eq!(chat["dir"], "~/devel/nibble");
 
     // -c picks the newest, comparing ids as numbers.
     let out = nibble(&base, &url, &["--no-tools", "-c", "Third"]);
