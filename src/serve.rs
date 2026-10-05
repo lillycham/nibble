@@ -270,14 +270,15 @@ fn switch(client: &mut TcpStream, request: &web::Request, state: &Mutex<Backend>
 }
 
 /// What `GET /info` says: the model, whether it is loaded, the others to
-/// choose from, and more.
+/// choose from, and more. `dir` says that `POST /chat` takes a folder, so a
+/// client can tell an older server, which would ignore it without a word.
 /// With `settings`, which only a client with the token gets, also the
 /// settings really in use: after the model's presets, with the defaults that
 /// depend on how the server was started filled in. Never the token.
 pub fn info(settings: bool) -> Value {
     let config = crate::config::get();
     let models: Vec<String> = models().into_iter().map(|(name, _)| name).collect();
-    let mut info = json!({ "model": config.model_name, "state": model_state(), "models": models, "tools": web::tools_allowed(), "version": env!("CARGO_PKG_VERSION") });
+    let mut info = json!({ "model": config.model_name, "state": model_state(), "models": models, "tools": web::tools_allowed(), "dir": true, "version": env!("CARGO_PKG_VERSION") });
     if settings {
         let mut in_use = config.to_json();
         let in_use = in_use.as_object_mut().expect("settings are an object");
@@ -830,6 +831,7 @@ mod tests {
         let names: Vec<String> = models().into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, ["a-model", "b-model"]);
         assert_eq!(info(false)["models"], json!(["a-model", "b-model"]));
+        assert_eq!(info(false)["dir"], true);
         // Only a client with the token is told the settings, and then the
         // folder the models were found in, never the token.
         assert!(info(false).get("settings").is_none());

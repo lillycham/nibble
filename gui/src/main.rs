@@ -183,6 +183,8 @@ struct Models {
     /// The settings the server really uses, for the settings page to show
     /// in place of its default hints.
     in_use: Map<String, Value>,
+    /// Whether `/chat` takes a folder for the chat. An older server ignores one.
+    dir: bool,
 }
 
 impl Models {
@@ -191,7 +193,8 @@ impl Models {
         let all = info["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
         let state = info["state"].as_str().unwrap_or_default().to_string();
         let in_use = info["settings"].as_object().cloned().unwrap_or_default();
-        Some(Models { current, state, all, in_use })
+        let dir = info["dir"].as_bool() == Some(true);
+        Some(Models { current, state, all, in_use, dir })
     }
 }
 
@@ -546,6 +549,9 @@ impl Nibble {
                 done(self, cx);
                 self.quote = !self.quote;
             }
+            "cd" if !self.models.dir && !self.models.current.is_empty() => {
+                self.command_error = Some("This nibble serve is too old to take a folder per chat. Update it first.".into());
+            }
             "cd" if !self.file_tools() => {
                 self.command_error = Some("The server gives chats no file tools, so there is no folder to choose.".into());
             }
@@ -692,9 +698,10 @@ impl Nibble {
         .detach();
     }
 
-    /// Whether the server gives chats its file tools, and so a folder to work in.
+    /// Whether the server gives chats its file tools, and so a folder to work
+    /// in, and takes the folder at all.
     fn file_tools(&self) -> bool {
-        self.models.in_use.get("tools").and_then(Value::as_bool) == Some(true)
+        self.models.dir && self.models.in_use.get("tools").and_then(Value::as_bool) == Some(true)
     }
 
     /// The folders the server lets chats read inside, as it gives them.

@@ -145,6 +145,9 @@
   dropped folder, the folder button by Send (the system's folder dialog) or
   `/cd PATH`, and saves it with the chat as `"dir"`. The command line keeps
   the key when it continues such a chat, but works in its own directory.
+  `/info` says `"dir": true`, and the window shows the folder only then:
+  an older server ignores the field, which looked like the folder did
+  nothing.
   Plugins still run in the server's directory. The web page has no control
   for it yet (phase 6).
 
